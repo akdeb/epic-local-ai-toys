@@ -1,0 +1,441 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NeuTTS Air - Text to Speech Streaming</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+
+        .container {
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.1);
+            padding: 40px;
+            max-width: 600px;
+            width: 100%;
+        }
+
+        .header {
+            text-align: center;
+            margin-bottom: 30px;
+        }
+
+        .header h1 {
+            color: #333;
+            font-size: 2.5em;
+            margin-bottom: 10px;
+            background: linear-gradient(135deg, #667eea, #764ba2);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        .header p {
+            color: #666;
+            font-size: 1.1em;
+        }
+
+        .input-group {
+            margin-bottom: 30px;
+        }
+
+        .input-group label {
+            display: block;
+            margin-bottom: 10px;
+            color: #333;
+            font-weight: 600;
+            font-size: 1.1em;
+        }
+
+        .input-group textarea {
+            width: 100%;
+            padding: 15px;
+            border: 2px solid #e1e5e9;
+            border-radius: 10px;
+            font-size: 16px;
+            font-family: inherit;
+            resize: vertical;
+            min-height: 120px;
+            transition: border-color 0.3s ease;
+        }
+
+        .input-group textarea:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+
+        .controls {
+            display: flex;
+            gap: 15px;
+            margin-bottom: 30px;
+            flex-wrap: wrap;
+        }
+
+        .control-group {
+            flex: 1;
+            min-width: 150px;
+        }
+
+        .control-group label {
+            display: block;
+            margin-bottom: 5px;
+            color: #333;
+            font-weight: 600;
+            font-size: 0.9em;
+        }
+
+        .control-group select {
+            width: 100%;
+            padding: 10px;
+            border: 2px solid #e1e5e9;
+            border-radius: 8px;
+            font-size: 14px;
+            background: white;
+            transition: border-color 0.3s ease;
+        }
+
+        .control-group select:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+
+        .button-group {
+            display: flex;
+            gap: 15px;
+            justify-content: center;
+            flex-wrap: wrap;
+        }
+
+        .btn {
+            padding: 15px 30px;
+            border: none;
+            border-radius: 10px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            min-width: 140px;
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, #667eea, #764ba2);
+            color: white;
+        }
+
+        .btn-primary:hover:not(:disabled) {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 20px rgba(102, 126, 234, 0.3);
+        }
+
+        .btn-secondary {
+            background: #f8f9fa;
+            color: #333;
+            border: 2px solid #e1e5e9;
+        }
+
+        .btn-secondary:hover:not(:disabled) {
+            background: #e9ecef;
+            transform: translateY(-2px);
+        }
+
+        .btn:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none !important;
+        }
+
+        .status {
+            text-align: center;
+            margin: 20px 0;
+            padding: 15px;
+            border-radius: 10px;
+            font-weight: 600;
+            display: none;
+        }
+
+        .status.success {
+            background: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+
+        .status.error {
+            background: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+
+        .status.info {
+            background: #d1ecf1;
+            color: #0c5460;
+            border: 1px solid #bee5eb;
+        }
+
+        .audio-container {
+            margin-top: 30px;
+            text-align: center;
+        }
+
+        .audio-container audio {
+            width: 100%;
+            max-width: 500px;
+        }
+
+        .loading {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 3px solid #f3f3f3;
+            border-top: 3px solid #667eea;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin-right: 10px;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .footer {
+            text-align: center;
+            margin-top: 30px;
+            color: #666;
+            font-size: 0.9em;
+        }
+
+        @media (max-width: 600px) {
+            .container {
+                padding: 20px;
+            }
+            
+            .header h1 {
+                font-size: 2em;
+            }
+            
+            .controls {
+                flex-direction: column;
+            }
+            
+            .button-group {
+                flex-direction: column;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🎤 NeuTTS Air</h1>
+            <p>Real-time Text-to-Speech with Neural Voice Cloning</p>
+        </div>
+
+        <form id="ttsForm">
+            <div class="input-group">
+                <label for="textInput">Enter your text:</label>
+                <textarea 
+                    id="textInput" 
+                    placeholder="Type or paste your text here... (e.g., 'Hello, this is a test of the neural text-to-speech system.')"
+                    required
+                ></textarea>
+            </div>
+
+            <div class="controls">
+                <div class="control-group">
+                    <label for="voiceSelect">Voice:</label>
+                    <select id="voiceSelect">
+                        <option value="dave">Dave (Male)</option>
+                        <option value="jo">Jo (Female)</option>
+                    </select>
+                </div>
+                <div class="control-group">
+                    <label for="modelSelect">Model:</label>
+                    <select id="modelSelect">
+                        <option value="neuphonic/neutts-air-q8-gguf">High Quality (Q8)</option>
+                        <option value="neuphonic/neutts-air-q4-gguf">Fast (Q4)</option>
+                    </select>
+                </div>
+            </div>
+
+            <div class="button-group">
+                <button type="submit" class="btn btn-primary" id="synthesizeBtn">
+                    <span id="btnText">🎵 Synthesize Speech</span>
+                </button>
+                <button type="button" class="btn btn-secondary" id="stopBtn" disabled>
+                    ⏹️ Stop
+                </button>
+            </div>
+        </form>
+
+        <div id="status" class="status"></div>
+
+        <div class="audio-container" id="audioContainer" style="display: none;">
+            <audio id="audioPlayer" controls preload="none">
+                Your browser does not support the audio element.
+            </audio>
+        </div>
+
+        <div class="footer">
+            <p>Powered by NeuTTS Air • Streaming TTS with Neural Voice Cloning</p>
+        </div>
+    </div>
+
+    <script>
+        class TTSClient {
+            constructor() {
+                this.form = document.getElementById('ttsForm');
+                this.textInput = document.getElementById('textInput');
+                this.voiceSelect = document.getElementById('voiceSelect');
+                this.modelSelect = document.getElementById('modelSelect');
+                this.synthesizeBtn = document.getElementById('synthesizeBtn');
+                this.stopBtn = document.getElementById('stopBtn');
+                this.status = document.getElementById('status');
+                this.audioContainer = document.getElementById('audioContainer');
+                this.audioPlayer = document.getElementById('audioPlayer');
+                this.btnText = document.getElementById('btnText');
+                
+                this.isGenerating = false;
+                this.currentController = null;
+                
+                this.setupEventListeners();
+            }
+
+            setupEventListeners() {
+                this.form.addEventListener('submit', (e) => {
+                    e.preventDefault();
+                    this.synthesizeSpeech();
+                });
+
+                this.stopBtn.addEventListener('click', () => {
+                    this.stopGeneration();
+                });
+
+                // Auto-resize textarea
+                this.textInput.addEventListener('input', () => {
+                    this.textInput.style.height = 'auto';
+                    this.textInput.style.height = this.textInput.scrollHeight + 'px';
+                });
+            }
+
+            showStatus(message, type = 'info') {
+                this.status.textContent = message;
+                this.status.className = `status ${type}`;
+                this.status.style.display = 'block';
+            }
+
+            hideStatus() {
+                this.status.style.display = 'none';
+            }
+
+            setLoading(loading) {
+                this.isGenerating = loading;
+                this.synthesizeBtn.disabled = loading;
+                this.stopBtn.disabled = !loading;
+                
+                if (loading) {
+                    this.btnText.innerHTML = '<span class="loading"></span>Generating...';
+                } else {
+                    this.btnText.textContent = '🎵 Synthesize Speech';
+                }
+            }
+
+            async synthesizeSpeech() {
+                const text = this.textInput.value.trim();
+                if (!text) {
+                    this.showStatus('Please enter some text to synthesize.', 'error');
+                    return;
+                }
+
+                this.setLoading(true);
+                this.hideStatus();
+                this.audioContainer.style.display = 'none';
+
+                try {
+                    const voice = this.voiceSelect.value;
+                    const model = this.modelSelect.value;
+                    
+                    const refCodesPath = `./neuttsair/samples/${voice}.pt`;
+                    const refTextPath = `./neuttsair/samples/${voice}.txt`;
+
+                    const response = await fetch('/synthesize-with-timing', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify({
+                            text: text,
+                            ref_codes_path: refCodesPath,
+                            ref_text: refTextPath,
+                            backbone: model
+                        })
+                    });
+
+                    if (!response.ok) {
+                        const errorData = await response.json();
+                        throw new Error(errorData.detail || 'Failed to synthesize speech');
+                    }
+
+                    // Parse the JSON response
+                    const data = await response.json();
+                    
+                    // Extract timing information
+                    const timing = data.timing;
+                    const latency = timing.latency_ms;
+                    const totalChunks = timing.total_chunks;
+                    const totalTime = timing.total_time_ms;
+
+                    // Convert base64 audio data to blob
+                    const audioData = data.audio_data;
+                    const binaryString = atob(audioData);
+                    const bytes = new Uint8Array(binaryString.length);
+                    for (let i = 0; i < binaryString.length; i++) {
+                        bytes[i] = binaryString.charCodeAt(i);
+                    }
+                    const audioBlob = new Blob([bytes], { type: 'audio/wav' });
+                    const audioUrl = URL.createObjectURL(audioBlob);
+                    
+                    this.audioPlayer.src = audioUrl;
+                    this.audioContainer.style.display = 'block';
+                    this.showStatus(`Speech generated successfully! Latency: ${latency}ms, Chunks: ${totalChunks}, Total: ${totalTime}ms. Click play to listen.`, 'success');
+
+                } catch (error) {
+                    console.error('Error synthesizing speech:', error);
+                    this.showStatus(`Error: ${error.message}`, 'error');
+                } finally {
+                    this.setLoading(false);
+                    this.currentController = null;
+                }
+            }
+
+            stopGeneration() {
+                if (this.currentController) {
+                    this.currentController.abort();
+                    this.currentController = null;
+                }
+                this.setLoading(false);
+                this.showStatus('Generation stopped.', 'info');
+            }
+        }
+
+        // Initialize the TTS client when the page loads
+        document.addEventListener('DOMContentLoaded', () => {
+            new TTSClient();
+        });
+    </script>
+</body>
+</html>
