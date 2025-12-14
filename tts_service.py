@@ -6,6 +6,7 @@ import numpy as np
 from fastapi import HTTPException
 from neuttsair.neuttsair.neutts import NeuTTSAir
 from utils import create_wav_header
+from path_utils import get_resource_path
 
 
 class TTSService:
@@ -26,8 +27,8 @@ class TTSService:
             
             print("Caching reference audio data...")
             for voice in ["dave", "jo"]:
-                ref_codes_path = f"./neuttsair/samples/{voice}.npy"
-                ref_text_path = f"./neuttsair/samples/{voice}.txt"
+                ref_codes_path = get_resource_path(f"neuttsair/samples/{voice}.npy")
+                ref_text_path = get_resource_path(f"neuttsair/samples/{voice}.txt")
                 
                 ref_codes = None
                 ref_text = None
@@ -123,6 +124,15 @@ class TTSService:
     
     def is_initialized(self) -> bool:
         return self.tts is not None
+
+    def unload(self) -> None:
+        if self.tts is not None:
+            print("Unloading TTS...")
+            del self.tts
+            self.tts = None
+            import gc
+            gc.collect()
+            print("TTS unloaded successfully!")
 
 
 tts_service = TTSService()

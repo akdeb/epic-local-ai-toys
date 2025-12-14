@@ -1,8 +1,48 @@
+import os
+import sys
+
+# Set espeak library path for macOS homebrew if not set
+if sys.platform == "darwin":
+    if not os.environ.get("PHONEMIZER_ESPEAK_LIBRARY"):
+        possible_paths = [
+            "/opt/homebrew/lib/libespeak-ng.dylib",
+            "/usr/local/lib/libespeak-ng.dylib"
+        ]
+        for path in possible_paths:
+            if os.path.exists(path):
+                os.environ["PHONEMIZER_ESPEAK_LIBRARY"] = path
+                print(f"Set PHONEMIZER_ESPEAK_LIBRARY to {path}")
+                break
+    
+    # Hack to help opuslib find libopus on macOS
+    import ctypes.util
+    _find_library = ctypes.util.find_library
+    def find_library(name):
+        if name == 'opus':
+            paths = [
+                '/opt/homebrew/lib/libopus.dylib',
+                '/usr/local/lib/libopus.dylib',
+            ]
+            for path in paths:
+                if os.path.exists(path):
+                    return path
+        return _find_library(name)
+    ctypes.util.find_library = find_library
+
 import io
 import re
+import json
 import base64
 import asyncio
 import numpy as np
+from typing import Optional
+try:
+    import opuslib
+    OPUS_AVAILABLE = True
+except Exception as e:
+    print(f"Opus library not available: {e}")
+    OPUS_AVAILABLE = False
+
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse, FileResponse
 from models import TextRequest, OpenAISpeechRequest
@@ -10,18 +50,20 @@ from tts_service import tts_service
 from llm_service import llm_service
 from stt_service import stt_service
 from utils import convert_audio_format, get_media_type_and_filename
+from path_utils import get_resource_path
 
 app = FastAPI(title="NeuTTS Air Streaming API")
 
 @app.on_event("startup")
 async def startup_event():
-    tts_service.initialize_tts()
-    llm_service.initialize_llm()
-    stt_service.initialize_stt()
+    # Lazy init: Models are loaded only when first requested to save resources/battery
+    print("NeuTTS Air started. Models will be loaded on first use.")
+    pass
 
 @app.get("/")
 async def read_root():
-    return FileResponse("index.html")
+    return FileResponse(get_resource_path("index.html"))
+
 
 @app.get("/health")
 async def health_check():
@@ -152,9 +194,6 @@ async def synthesize_speech_with_timing(request: TextRequest):
 @app.get("/chat")
 async def chat_page():
     return FileResponse("chat.html")
-
-
-class SentenceBuffer:
     """Buffers text tokens and yields complete sentences."""
     
     def __init__(self):
@@ -186,72 +225,152 @@ class SentenceBuffer:
         return remaining
 
 
-@app.websocket("/ws/chat")
-async def websocket_chat(websocket: WebSocket):
-    await websocket.accept()
-    
-    try:
-        while True:
-            data = await websocket.receive_json()
-            prompt = data.get("prompt", "")
-            voice = data.get("voice", "dave")
-            system_prompt = data.get("system_prompt", "You are a helpful assistant. Keep responses concise and conversational.")
+class OpusStreamer:
+    """Buffers PCM audio and encodes it into Opus frames."""
+    def __init__(self, sample_rate: int = 24000, channels: int = 1, frame_duration_ms: int = 60):
+        self.sample_rate = sample_rate
+        self.channels = channels
+        self.frame_duration_ms = frame_duration_ms
+        self.frame_size = int(sample_rate * frame_duration_ms / 1000)
+        self.buffer = bytearray()
+        
+        self.enabled = OPUS_AVAILABLE
+        if not self.enabled:
+            print("OpusStreamer disabled: opuslib not available")
+            return
             
-            if not prompt:
-                await websocket.send_json({"type": "error", "message": "No prompt provided"})
-                continue
+        try:
+            self.encoder = opuslib.Encoder(sample_rate, channels, opuslib.APPLICATION_VOIP)
+            try:
+                self.encoder.bitrate = 24000
+            except Exception as e:
+                print(f"Warning: Failed to set Opus bitrate: {e}")
+            print(f"OpusStreamer initialized: {frame_duration_ms}ms frames ({self.frame_size} samples)")
+        except Exception as e:
+            print(f"Failed to create Opus encoder: {e}")
+            self.enabled = False
+
+    def boost_audio(self, pcm_data: np.ndarray, gain_db: float = 6.0, ceiling: float = 0.89) -> np.ndarray:
+        """
+        Apply gain, limiting and soft-clipping to audio data.
+        Replicates boostLimitPCM16LEInPlace logic.
+        """
+        if pcm_data.size == 0:
+            return pcm_data
             
-            ref_codes, ref_text = tts_service.get_cached_reference_data(voice)
-            if ref_codes is None:
-                await websocket.send_json({"type": "error", "message": f"Voice {voice} not found"})
-                continue
+        # 1. Apply Gain
+        g = 10 ** (gain_db / 20.0)
+        y = pcm_data * g
+        
+        # 2. Measure Peak
+        peak = np.max(np.abs(y))
+        
+        # 3. Calculate Scale (prevent hard clipping if above ceiling)
+        scale = 1.0
+        if peak > ceiling and peak > 0:
+            scale = ceiling / peak
             
-            sentence_buffer = SentenceBuffer()
-            full_response = ""
+        # 4. Apply Scale
+        y = y * scale
+        
+        # 5. Cubic Soft-Clip: y = 0.5 * y * (3 - y^2)
+        # Prevents harsh square-waving at the limits
+        y_sq = y * y
+        y = 0.5 * y * (3 - y_sq)
+        
+        # 6. Hard Clamp (safety)
+        y = np.clip(y, -0.999, 0.999)
+        
+        return y
+
+    def process(self, pcm_data: np.ndarray) -> list[bytes]:
+        """Process PCM chunk and return list of Opus packets."""
+        if not self.enabled:
+            return []
+
+        # Convert to float32 if needed for processing
+        if pcm_data.dtype != np.float32:
+            if pcm_data.dtype == np.int16:
+                pcm_float = pcm_data.astype(np.float32) / 32768.0
+            else:
+                pcm_float = pcm_data.astype(np.float32)
+        else:
+            pcm_float = pcm_data
+
+        # Apply Volume Boost / Soft Clip
+        pcm_boosted = self.boost_audio(pcm_float)
+
+        # Convert back to int16 for Opus encoding
+        audio_int16 = (pcm_boosted * 32767).astype(np.int16)
+            
+        self.buffer.extend(audio_int16.tobytes())
+        
+        bytes_per_frame = self.frame_size * 2 * self.channels
+        packets = []
+        
+        while len(self.buffer) >= bytes_per_frame:
+            frame_bytes = self.buffer[:bytes_per_frame]
+            del self.buffer[:bytes_per_frame]
             
             try:
-                for token in llm_service.generate_stream(prompt, system_prompt):
-                    full_response += token
-                    await websocket.send_json({"type": "token", "content": token})
-                    
-                    sentences = sentence_buffer.add(token)
-                    for sentence in sentences:
-                        audio_chunks, _ = tts_service.generate_audio_with_timing(sentence, ref_codes, ref_text)
-                        if audio_chunks:
-                            wav_data = tts_service.create_wav_data(audio_chunks)
-                            audio_b64 = base64.b64encode(wav_data).decode('utf-8')
-                            await websocket.send_json({
-                                "type": "audio",
-                                "content": audio_b64,
-                                "sentence": sentence
-                            })
-                
-                remaining = sentence_buffer.flush()
-                if remaining:
-                    audio_chunks, _ = tts_service.generate_audio_with_timing(remaining, ref_codes, ref_text)
-                    if audio_chunks:
-                        wav_data = tts_service.create_wav_data(audio_chunks)
-                        audio_b64 = base64.b64encode(wav_data).decode('utf-8')
-                        await websocket.send_json({
-                            "type": "audio",
-                            "content": audio_b64,
-                            "sentence": remaining
-                        })
-                
-                await websocket.send_json({"type": "done", "full_response": full_response})
-                
+                packet = self.encoder.encode(bytes(frame_bytes), self.frame_size)
+                packets.append(packet)
             except Exception as e:
-                print(f"Error in chat generation: {e}")
-                await websocket.send_json({"type": "error", "message": str(e)})
-    
-    except WebSocketDisconnect:
-        print("WebSocket disconnected")
+                print(f"Opus encoding error: {e}")
+        
+        if packets:
+            # print(f"Encoded {len(packets)} Opus packets")
+            pass
+            
+        return packets
+
+    def flush(self) -> list[bytes]:
+        """Flush remaining buffer by padding with silence."""
+        if not self.enabled or not self.buffer:
+            return []
+            
+        bytes_per_frame = self.frame_size * 2 * self.channels
+        padding_needed = bytes_per_frame - len(self.buffer)
+        
+        if padding_needed > 0:
+            self.buffer.extend(b'\x00' * padding_needed)
+            
+        packets = []
+        try:
+            packet = self.encoder.encode(bytes(self.buffer), self.frame_size)
+            packets.append(packet)
+            print("Flushed 1 final Opus packet")
+        except Exception as e:
+            print(f"Opus flush error: {e}")
+            
+        self.buffer = bytearray()
+        return packets
+
+    def reset(self):
+        self.buffer = bytearray()
+        if self.enabled:
+            try:
+                self.encoder.reset_state()
+            except:
+                pass
+
 
 
 @app.websocket("/ws/voice")
 async def websocket_voice(websocket: WebSocket):
     """Voice chat: audio in -> STT -> LLM -> TTS -> audio out"""
     await websocket.accept()
+    
+    # Lazy init on connection
+    if not stt_service.is_initialized():
+        print("Initializing STT for voice chat...")
+        stt_service.initialize_stt()
+    if not llm_service.is_initialized():
+        print("Initializing LLM for voice chat...")
+        llm_service.initialize_llm()
+    if not tts_service.is_initialized():
+        print("Initializing TTS for voice chat...")
+        tts_service.initialize_tts()
     
     voice = "dave"
     system_prompt = "You are a helpful voice assistant. Be concise."
@@ -353,9 +472,34 @@ async def websocket_voice(websocket: WebSocket):
         print("Voice WebSocket disconnected")
     finally:
         stt_service.reset()
+        print("Cleaning up voice resources... (Keeping models loaded)")
+        # stt_service.unload()
+        # llm_service.unload()
+        # tts_service.unload()
 
 
-async def generate_greeting(websocket: WebSocket, voice: str, system_prompt: str, is_esp32: bool = False):
+async def send_audio_chunked(websocket: WebSocket, pcm_data: np.ndarray, chunk_size: int = 1024) -> bool:
+    """
+    Send PCM data in chunks to avoid WebSocket payload limits.
+    Returns True if sent successfully, False if client disconnected.
+    """
+    if pcm_data.dtype == np.float32:
+        pcm_bytes = (pcm_data * 32767).astype(np.int16).tobytes()
+    else:
+        pcm_bytes = pcm_data.tobytes()
+    
+    try:
+        for i in range(0, len(pcm_bytes), chunk_size):
+            await websocket.send_bytes(pcm_bytes[i:i + chunk_size])
+            # Yield to event loop
+            await asyncio.sleep(0)
+        return True
+    except Exception as e:
+        print(f"Error sending audio chunk: {e}")
+        return False
+
+
+async def generate_greeting(websocket: WebSocket, voice: str, system_prompt: str, is_esp32: bool = False, opus_streamer: Optional['OpusStreamer'] = None):
     """Generate and send initial greeting from the assistant."""
     ref_codes, ref_text = tts_service.get_cached_reference_data(voice)
     if ref_codes is None:
@@ -367,64 +511,114 @@ async def generate_greeting(websocket: WebSocket, voice: str, system_prompt: str
     full_response = ""
     first_audio = True
     
-    for token in llm_service.generate_stream(greeting_prompt, system_prompt):
-        full_response += token
-        
-        if not is_esp32:
-            await websocket.send_json({"type": "token", "content": token})
-        
-        for sentence in sentence_buffer.add(token):
-            if len(sentence.strip()) < 3:
-                continue
+    try:
+        for token in llm_service.generate_stream(greeting_prompt, system_prompt):
+            full_response += token
             
+            if not is_esp32:
+                try:
+                    await websocket.send_json({"type": "token", "content": token})
+                except Exception:
+                    return
+            
+            for sentence in sentence_buffer.add(token):
+                if len(sentence.strip()) < 3:
+                    continue
+                
+                if is_esp32 and first_audio:
+                    try:
+                        await websocket.send_json({
+                            "type": "server", 
+                            "msg": "RESPONSE.CREATED",
+                            "volume_control": 70
+                        })
+                    except Exception:
+                        return
+                    first_audio = False
+                
+                try:
+                    audio_chunks, _ = tts_service.generate_audio_with_timing(sentence, ref_codes, ref_text)
+                    if audio_chunks:
+                        if is_esp32:
+                            pcm_data = np.concatenate(audio_chunks)
+                            if opus_streamer and opus_streamer.enabled:
+                                packets = opus_streamer.process(pcm_data)
+                                for packet in packets:
+                                    try:
+                                        await websocket.send_bytes(packet)
+                                        await asyncio.sleep(0)
+                                    except Exception:
+                                        return
+                            else:
+                                if not await send_audio_chunked(websocket, pcm_data):
+                                    return
+                        else:
+                            wav_data = tts_service.create_wav_data(audio_chunks)
+                            await websocket.send_json({
+                                "type": "audio",
+                                "content": base64.b64encode(wav_data).decode('utf-8'),
+                                "sentence": sentence
+                            })
+                except Exception as e:
+                    print(f"Greeting TTS error: {e}")
+        
+        remaining = sentence_buffer.flush()
+        if remaining and len(remaining.strip()) >= 3:
             if is_esp32 and first_audio:
-                await websocket.send_json({"type": "server", "msg": "RESPONSE.CREATED"})
+                try:
+                    await websocket.send_json({
+                        "type": "server", 
+                        "msg": "RESPONSE.CREATED",
+                        "volume_control": 70
+                    })
+                except Exception:
+                    return
                 first_audio = False
-            
+
             try:
-                audio_chunks, _ = tts_service.generate_audio_with_timing(sentence, ref_codes, ref_text)
+                audio_chunks, _ = tts_service.generate_audio_with_timing(remaining, ref_codes, ref_text)
                 if audio_chunks:
                     if is_esp32:
                         pcm_data = np.concatenate(audio_chunks)
-                        pcm_16bit = (pcm_data * 32767).astype(np.int16)
-                        await websocket.send_bytes(pcm_16bit.tobytes())
+                        if opus_streamer and opus_streamer.enabled:
+                            packets = opus_streamer.process(pcm_data)
+                            for packet in packets:
+                                try:
+                                    await websocket.send_bytes(packet)
+                                    await asyncio.sleep(0)
+                                except Exception:
+                                    return
+                        else:
+                            if not await send_audio_chunked(websocket, pcm_data):
+                                return
                     else:
                         wav_data = tts_service.create_wav_data(audio_chunks)
                         await websocket.send_json({
                             "type": "audio",
                             "content": base64.b64encode(wav_data).decode('utf-8'),
-                            "sentence": sentence
+                            "sentence": remaining
                         })
             except Exception as e:
                 print(f"Greeting TTS error: {e}")
-    
-    remaining = sentence_buffer.flush()
-    if remaining and len(remaining.strip()) >= 3:
-        try:
-            audio_chunks, _ = tts_service.generate_audio_with_timing(remaining, ref_codes, ref_text)
-            if audio_chunks:
-                if is_esp32:
-                    pcm_data = np.concatenate(audio_chunks)
-                    pcm_16bit = (pcm_data * 32767).astype(np.int16)
-                    await websocket.send_bytes(pcm_16bit.tobytes())
-                else:
-                    wav_data = tts_service.create_wav_data(audio_chunks)
-                    await websocket.send_json({
-                        "type": "audio",
-                        "content": base64.b64encode(wav_data).decode('utf-8'),
-                        "sentence": remaining
-                    })
-        except Exception as e:
-            print(f"Greeting TTS error: {e}")
-    
-    if is_esp32:
-        await websocket.send_json({"type": "server", "msg": "RESPONSE.COMPLETE"})
-    else:
-        await websocket.send_json({"type": "done", "full_response": full_response})
-    
-    print(f"[Greeting] {full_response}")
+        
+        if is_esp32:
+            try:
+                await websocket.send_json({"type": "server", "msg": "RESPONSE.COMPLETE"})
+            except Exception:
+                return
+        else:
+            try:
+                await websocket.send_json({"type": "done", "full_response": full_response})
+            except Exception:
+                return
+        
+        print(f"[Greeting] {full_response}")
+        
+    except Exception as e:
+        print(f"Error in generate_greeting: {e}")
 
 
+@app.websocket("/")
 @app.websocket("/ws/esp32")
 async def websocket_esp32(websocket: WebSocket):
     """
@@ -434,27 +628,48 @@ async def websocket_esp32(websocket: WebSocket):
     """
     await websocket.accept()
     
+    # Lazy init on connection
+    if not stt_service.is_initialized():
+        print("Initializing STT for ESP32...")
+        stt_service.initialize_stt()
+    if not llm_service.is_initialized():
+        print("Initializing LLM for ESP32...")
+        llm_service.initialize_llm()
+    if not tts_service.is_initialized():
+        print("Initializing TTS for ESP32...")
+        tts_service.initialize_tts()
+    
     voice = "dave"
     system_prompt = "You are a helpful voice assistant. Be concise and conversational."
     input_sample_rate = 16000  # ESP32 mic sample rate
     
+    # Initialize Opus Streamer
+    opus_streamer = OpusStreamer(sample_rate=24000, frame_duration_ms=60)
+    
     # Send auth response
-    await websocket.send_json({
-        "type": "auth",
-        "volume_control": 70,
-        "pitch_factor": 1.0,
-        "is_ota": False,
-        "is_reset": False
-    })
+    try:
+        await websocket.send_json({
+            "type": "auth",
+            "volume_control": 70,
+            "pitch_factor": 1.0,
+            "is_ota": False,
+            "is_reset": False
+        })
+    except Exception:
+        print("[ESP32] Client disconnected during auth")
+        return
     
     print("[ESP32] Client connected")
     
     # Send initial greeting
-    await generate_greeting(websocket, voice, system_prompt, is_esp32=True)
+    await generate_greeting(websocket, voice, system_prompt, is_esp32=True, opus_streamer=opus_streamer)
     
     try:
         while True:
-            message = await websocket.receive()
+            try:
+                message = await websocket.receive()
+            except Exception:
+                break
             
             if message.get("type") == "websocket.disconnect":
                 break
@@ -482,20 +697,30 @@ async def websocket_esp32(websocket: WebSocket):
                     print(f"[ESP32] Transcript: {result.text}")
                     
                     # Notify audio committed
-                    await websocket.send_json({"type": "server", "msg": "AUDIO.COMMITTED"})
+                    try:
+                        await websocket.send_json({"type": "server", "msg": "AUDIO.COMMITTED"})
+                    except Exception:
+                        break
                     
                     # Get TTS reference data
                     ref_codes, ref_text = tts_service.get_cached_reference_data(voice)
                     if ref_codes is None:
-                        await websocket.send_json({"type": "server", "msg": "RESPONSE.ERROR"})
+                        try:
+                            await websocket.send_json({"type": "server", "msg": "RESPONSE.ERROR"})
+                        except Exception:
+                            break
                         stt_service.reset()
                         continue
                     
                     # Generate LLM response
                     sentence_buffer = SentenceBuffer()
                     full_response = ""
+                    client_active = True
                     
                     for token in llm_service.generate_stream(result.text, system_prompt):
+                        if not client_active:
+                            break
+                            
                         full_response += token
                         
                         for sentence in sentence_buffer.add(token):
@@ -504,41 +729,91 @@ async def websocket_esp32(websocket: WebSocket):
                             
                             # Notify response created (first audio)
                             if not hasattr(websocket, '_sent_response_created'):
-                                await websocket.send_json({"type": "server", "msg": "RESPONSE.CREATED"})
-                                websocket._sent_response_created = True
+                                try:
+                                    await websocket.send_json({
+                                        "type": "server", 
+                                        "msg": "RESPONSE.CREATED",
+                                        "volume_control": 70
+                                    })
+                                    websocket._sent_response_created = True
+                                except Exception:
+                                    client_active = False
+                                    break
                             
                             try:
                                 audio_chunks, _ = tts_service.generate_audio_with_timing(sentence, ref_codes, ref_text)
                                 if audio_chunks:
-                                    # Combine chunks and send as raw PCM (ESP32 expects Opus but we'll send PCM for now)
                                     pcm_data = np.concatenate(audio_chunks)
-                                    pcm_16bit = (pcm_data * 32767).astype(np.int16)
-                                    await websocket.send_bytes(pcm_16bit.tobytes())
+                                    if opus_streamer.enabled:
+                                        packets = opus_streamer.process(pcm_data)
+                                        for packet in packets:
+                                            try:
+                                                await websocket.send_bytes(packet)
+                                                await asyncio.sleep(0)
+                                            except Exception:
+                                                client_active = False
+                                                break
+                                    else:
+                                        if not await send_audio_chunked(websocket, pcm_data):
+                                            client_active = False
+                                    
+                                    if not client_active:
+                                        break
                             except Exception as e:
                                 print(f"[ESP32] TTS error: {e}")
+                        
+                        if not client_active:
+                            break
                     
                     # Flush remaining text
-                    remaining = sentence_buffer.flush()
-                    if remaining and len(remaining.strip()) >= 3:
-                        if not hasattr(websocket, '_sent_response_created'):
-                            await websocket.send_json({"type": "server", "msg": "RESPONSE.CREATED"})
-                            websocket._sent_response_created = True
-                        
-                        try:
-                            audio_chunks, _ = tts_service.generate_audio_with_timing(remaining, ref_codes, ref_text)
-                            if audio_chunks:
-                                pcm_data = np.concatenate(audio_chunks)
-                                pcm_16bit = (pcm_data * 32767).astype(np.int16)
-                                await websocket.send_bytes(pcm_16bit.tobytes())
-                        except Exception as e:
-                            print(f"[ESP32] TTS error: {e}")
+                    if client_active:
+                        remaining = sentence_buffer.flush()
+                        if remaining and len(remaining.strip()) >= 3:
+                            if not hasattr(websocket, '_sent_response_created'):
+                                try:
+                                    await websocket.send_json({
+                                        "type": "server", 
+                                        "msg": "RESPONSE.CREATED",
+                                        "volume_control": 70
+                                    })
+                                    websocket._sent_response_created = True
+                                except Exception:
+                                    client_active = False
+                            
+                            if client_active:
+                                try:
+                                    audio_chunks, _ = tts_service.generate_audio_with_timing(remaining, ref_codes, ref_text)
+                                    if audio_chunks:
+                                        pcm_data = np.concatenate(audio_chunks)
+                                        if opus_streamer.enabled:
+                                            packets = opus_streamer.process(pcm_data)
+                                            for packet in packets:
+                                                try:
+                                                    await websocket.send_bytes(packet)
+                                                    await asyncio.sleep(0)
+                                                except Exception:
+                                                    client_active = False
+                                                    break
+                                        else:
+                                            if not await send_audio_chunked(websocket, pcm_data):
+                                                client_active = False
+                                except Exception as e:
+                                    print(f"[ESP32] TTS error: {e}")
                     
+                    if not client_active:
+                        print("[ESP32] Client disconnected during generation")
+                        break
+
                     # Notify response complete
-                    await websocket.send_json({"type": "server", "msg": "RESPONSE.COMPLETE"})
+                    try:
+                        await websocket.send_json({"type": "server", "msg": "RESPONSE.COMPLETE"})
+                    except Exception:
+                        break
                     delattr(websocket, '_sent_response_created') if hasattr(websocket, '_sent_response_created') else None
                     
                     print(f"[ESP32] Response: {full_response}")
                     stt_service.reset()
+                    opus_streamer.reset()
                     
             elif "text" in message:
                 # Handle JSON config messages
@@ -555,6 +830,10 @@ async def websocket_esp32(websocket: WebSocket):
         print("[ESP32] Client disconnected")
     finally:
         stt_service.reset()
+        print("[ESP32] Cleaning up resources... (Keeping models loaded)")
+        # stt_service.unload()
+        # llm_service.unload()
+        # tts_service.unload()
 
 
 if __name__ == "__main__":

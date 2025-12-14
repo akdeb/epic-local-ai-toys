@@ -67,5 +67,14 @@ class LLMService:
     def is_initialized(self) -> bool:
         return self.llm is not None
 
+    def unload(self) -> None:
+        if self.llm is not None:
+            print("Unloading LLM...")
+            del self.llm
+            self.llm = None
+            import gc
+            gc.collect()
+            print("LLM unloaded successfully!")
+
 
 llm_service = LLMService()

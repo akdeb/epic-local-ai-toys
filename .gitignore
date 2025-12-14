@@ -4,3 +4,23 @@ venv
 .env.development.local
 .env.test.local
 .env.production.local
+
+# Build artifacts
+build/
+dist/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# macOS
+.DS_Store
+
+# PyInstaller
+*.manifest
+
+# Audio artifacts
+*.wav

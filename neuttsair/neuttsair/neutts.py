@@ -1,9 +1,7 @@
 from typing import Generator, Union, Any
 from pathlib import Path
-import librosa
 import numpy as np
 import re
-import perth
 
 try:
     import torch
@@ -11,10 +9,23 @@ try:
 except ImportError:
     torch = None
     TORCH_AVAILABLE = False
-from neucodec import NeuCodec, DistillNeuCodec
+
+# Make neucodec optional/lazy import to avoid torch dependency if only using ONNX
+try:
+    from neucodec import NeuCodecOnnxDecoder
+    NEUCODEC_ONNX_AVAILABLE = True
+except ImportError:
+    NEUCODEC_ONNX_AVAILABLE = False
+
+# Transformers optional
+try:
+    from transformers import AutoTokenizer, AutoModelForCausalLM
+    TRANSFORMERS_AVAILABLE = True
+except ImportError:
+    TRANSFORMERS_AVAILABLE = False
+
 from phonemizer.backend import EspeakBackend
-from transformers import AutoTokenizer, AutoModelForCausalLM, TextIteratorStreamer
-from threading import Thread
+# from threading import Thread
 
 
 def _linear_overlap_add(frames: list[np.ndarray], stride: int) -> np.ndarray:
@@ -42,6 +53,26 @@ def _linear_overlap_add(frames: list[np.ndarray], stride: int) -> np.ndarray:
         offset += stride
     assert sum_weight.min() > 0
     return out / sum_weight
+
+
+class LocalOnnxDecoder:
+    """Local implementation of NeuCodecOnnxDecoder to avoid neucodec/torch dependency."""
+    def __init__(self, model_path):
+        import onnxruntime as ort
+        self.sess = ort.InferenceSession(model_path)
+    
+    @classmethod
+    def from_pretrained(cls, repo_id):
+        from huggingface_hub import hf_hub_download
+        model_path = hf_hub_download(repo_id, "model.onnx")
+        return cls(model_path)
+
+    def decode_code(self, codes):
+        # codes: np.ndarray of shape (batch, 1, seq_len) int32
+        input_name = self.sess.get_inputs()[0].name
+        output_name = self.sess.get_outputs()[0].name
+        audio = self.sess.run([output_name], {input_name: codes})[0]
+        return audio
 
 
 class NeuTTSAir:
@@ -82,7 +113,12 @@ class NeuTTSAir:
         self._load_codec(codec_repo, codec_device)
 
         # Load watermarker
-        self.watermarker = perth.PerthImplicitWatermarker()
+        try:
+            import perth
+            self.watermarker = perth.PerthImplicitWatermarker()
+        except Exception as e:
+            print(f"Warning: Failed to load watermarker: {e}. Watermarking will be disabled.")
+            self.watermarker = None
 
     def _load_backbone(self, backbone_repo, backbone_device):
         print(f"Loading backbone from: {backbone_repo} on {backbone_device} ...")
@@ -123,9 +159,15 @@ class NeuTTSAir:
         print(f"Loading codec from: {codec_repo} on {codec_device} ...")
         match codec_repo:
             case "neuphonic/neucodec":
+                if not TORCH_AVAILABLE:
+                    raise RuntimeError("torch is required for NeuCodec. Use 'neuphonic/neucodec-onnx-decoder' or install torch.")
+                from neucodec import NeuCodec
                 self.codec = NeuCodec.from_pretrained(codec_repo)
                 self.codec.eval().to(codec_device)
             case "neuphonic/distill-neucodec":
+                if not TORCH_AVAILABLE:
+                    raise RuntimeError("torch is required for DistillNeuCodec. Use 'neuphonic/neucodec-onnx-decoder' or install torch.")
+                from neucodec import DistillNeuCodec
                 self.codec = DistillNeuCodec.from_pretrained(codec_repo)
                 self.codec.eval().to(codec_device)
             case "neuphonic/neucodec-onnx-decoder":
@@ -133,15 +175,12 @@ class NeuTTSAir:
                 if codec_device != "cpu":
                     raise ValueError("Onnx decoder only currently runs on CPU.")
 
-                try:
-                    from neucodec import NeuCodecOnnxDecoder
-                except ImportError as e:
-                    raise ImportError(
-                        "Failed to import the onnx decoder."
-                        " Ensure you have onnxruntime installed as well as neucodec >= 0.0.4."
-                    ) from e
-
-                self.codec = NeuCodecOnnxDecoder.from_pretrained(codec_repo)
+                if NEUCODEC_ONNX_AVAILABLE:
+                    self.codec = NeuCodecOnnxDecoder.from_pretrained(codec_repo)
+                else:
+                    print("neucodec not found, using LocalOnnxDecoder")
+                    self.codec = LocalOnnxDecoder.from_pretrained(codec_repo)
+                
                 self._is_onnx_codec = True
 
             case _:
@@ -172,7 +211,10 @@ class NeuTTSAir:
 
         # Decode
         wav = self._decode(output_str)
-        watermarked_wav = self.watermarker.apply_watermark(wav, sample_rate=24_000)
+        if self.watermarker:
+            watermarked_wav = self.watermarker.apply_watermark(wav, sample_rate=24_000)
+        else:
+            watermarked_wav = wav
 
         return watermarked_wav
     
@@ -197,6 +239,12 @@ class NeuTTSAir:
     def encode_reference(self, ref_audio_path: str | Path):
         if not TORCH_AVAILABLE:
             raise RuntimeError("torch is required to encode new reference audio. Install with: pip install torch")
+        
+        try:
+            import librosa
+        except ImportError:
+            raise ImportError("librosa is required to encode reference audio. Install with: pip install librosa")
+            
         wav, _ = librosa.load(ref_audio_path, sr=16000, mono=True)
         wav_tensor = torch.from_numpy(wav).float().unsqueeze(0).unsqueeze(0)  # [1, 1, T]
         with torch.no_grad():
@@ -357,7 +405,8 @@ class NeuTTSAir:
                 )
                 curr_codes = token_cache[tokens_start:tokens_end]
                 recon = self._decode("".join(curr_codes))
-                recon = self.watermarker.apply_watermark(recon, sample_rate=24_000)
+                if self.watermarker:
+                    recon = self.watermarker.apply_watermark(recon, sample_rate=24_000)
                 recon = recon[sample_start:sample_end]
                 audio_cache.append(recon)
 
@@ -389,7 +438,8 @@ class NeuTTSAir:
             ) * self.hop_length
             curr_codes = token_cache[tokens_start:]
             recon = self._decode("".join(curr_codes))
-            recon = self.watermarker.apply_watermark(recon, sample_rate=24_000)
+            if self.watermarker:
+                recon = self.watermarker.apply_watermark(recon, sample_rate=24_000)
             recon = recon[sample_start:]
             audio_cache.append(recon)
 

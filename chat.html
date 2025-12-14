@@ -400,6 +400,33 @@
             async startRecording() {
                 console.log('[MIC] Starting recording...');
                 
+                // Handle missing navigator.mediaDevices (e.g. insecure context or older browser)
+                if (!navigator.mediaDevices) {
+                    console.warn('[MIC] navigator.mediaDevices is undefined. Checking for legacy APIs...');
+                    
+                    // Check if we are in an insecure context
+                    if (window.location.protocol !== 'https:' && 
+                        window.location.hostname !== 'localhost' && 
+                        window.location.hostname !== '127.0.0.1') {
+                        const msg = `Microphone access requires a secure context (HTTPS) or localhost.\nYou are accessing via: ${window.location.href}\nPlease try using http://localhost:8000/chat`;
+                        alert(msg);
+                        console.error(msg);
+                        return;
+                    }
+
+                    // Polyfill/Shim for legacy browsers
+                    navigator.mediaDevices = {};
+                    navigator.mediaDevices.getUserMedia = function(constraints) {
+                        const getUserMedia = navigator.webkitGetUserMedia || navigator.mozGetUserMedia || navigator.getUserMedia;
+                        if (!getUserMedia) {
+                            return Promise.reject(new Error('getUserMedia is not supported in this browser'));
+                        }
+                        return new Promise(function(resolve, reject) {
+                            getUserMedia.call(navigator, constraints, resolve, reject);
+                        });
+                    }
+                }
+                
                 // First get mic permission
                 try {
                     this.mediaStream = await navigator.mediaDevices.getUserMedia({

@@ -184,5 +184,20 @@ class STTService:
     def is_initialized(self) -> bool:
         return self._initialized
 
+    def unload(self) -> None:
+        if self._initialized:
+            print("Unloading STT...")
+            self.model = None
+            self.gen = None
+            self.audio_tokenizer = None
+            self.text_tokenizer = None
+            self.lm_config = None
+            self._initialized = False
+            self.current_text = ""
+            self.audio_buffer = np.array([], dtype=np.float32)
+            import gc
+            gc.collect()
+            print("STT unloaded successfully!")
+
 
 stt_service = STTService()
