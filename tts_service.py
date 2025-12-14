@@ -26,7 +26,7 @@ class TTSService:
             print("NeuTTSAir initialized successfully!")
             
             print("Caching reference audio data...")
-            for voice in ["dave", "jo"]:
+            for voice in ["dave", "jo", "mara", "santa"]:
                 ref_codes_path = get_resource_path(f"neuttsair/samples/{voice}.npy")
                 ref_text_path = get_resource_path(f"neuttsair/samples/{voice}.txt")
                 
@@ -59,6 +59,11 @@ class TTSService:
             return self.get_cached_reference_data("dave")
         elif "jo" in ref_codes_path:
             return self.get_cached_reference_data("jo")
+        elif "mara" in ref_codes_path:
+            return self.get_cached_reference_data("mara")
+        elif "santa" in ref_codes_path:
+            return self.get_cached_reference_data("santa")
+        
         
         ref_codes = None
         ref_text = None

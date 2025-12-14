@@ -64,6 +64,9 @@ async def startup_event():
 async def read_root():
     return FileResponse(get_resource_path("index.html"))
 
+@app.get("/chat")
+async def read_chat():
+    return FileResponse(get_resource_path("chat.html"))
 
 @app.get("/health")
 async def health_check():
@@ -117,7 +120,7 @@ async def openai_speech(request: OpenAISpeechRequest):
         if not tts_service.is_initialized():
             tts_service.initialize_tts()
         
-        voice_mapping = {"coral": "dave", "dave": "dave"}
+        voice_mapping = {"coral": "dave", "dave": "dave", "jo": "jo", "mara": "mara", "santa": "santa"}
         selected_voice = voice_mapping.get(request.voice, "dave")
         
         ref_codes, ref_text = tts_service.get_cached_reference_data(selected_voice)
@@ -191,9 +194,7 @@ async def synthesize_speech_with_timing(request: TextRequest):
         print(f"Error in synthesize_speech_with_timing: {e}")
         raise HTTPException(status_code=500, detail=f"Speech synthesis failed: {str(e)}")
 
-@app.get("/chat")
-async def chat_page():
-    return FileResponse("chat.html")
+class SentenceBuffer:
     """Buffers text tokens and yields complete sentences."""
     
     def __init__(self):
@@ -354,6 +355,94 @@ class OpusStreamer:
             except:
                 pass
 
+
+
+@app.websocket("/ws/chat")
+async def websocket_chat(websocket: WebSocket):
+    await websocket.accept()
+    print("[Chat] WebSocket connected")
+    
+    try:
+        while True:
+            data = await websocket.receive_json()
+            prompt = data.get("prompt", "")
+            print(f"[Chat] Received prompt: {prompt}")
+            
+            # Lazy init services on first request
+            if not llm_service.is_initialized():
+                await websocket.send_json({"type": "token", "content": " [Initializing models...]\n\n"})
+                llm_service.initialize_llm()
+            if not tts_service.is_initialized():
+                tts_service.initialize_tts()
+
+            voice = data.get("voice", "dave")
+            system_prompt = data.get("system_prompt", "You are a helpful assistant. Keep responses concise and conversational.")
+            
+            if not prompt:
+                await websocket.send_json({"type": "error", "message": "No prompt provided"})
+                continue
+            
+            ref_codes, ref_text = tts_service.get_cached_reference_data(voice)
+            if ref_codes is None:
+                await websocket.send_json({"type": "error", "message": f"Voice {voice} not found"})
+                continue
+            
+            sentence_buffer = SentenceBuffer()
+            full_response = ""
+            
+            try:
+                print("[Chat] Starting LLM generation...")
+                for token in llm_service.generate_stream(prompt, system_prompt):
+                    full_response += token
+                    await websocket.send_json({"type": "token", "content": token})
+                    
+                    sentences = sentence_buffer.add(token)
+                    for sentence in sentences:
+                        print(f"[Chat] Processing sentence: '{sentence}'")
+                        audio_chunks, _ = tts_service.generate_audio_with_timing(sentence, ref_codes, ref_text)
+                        if audio_chunks:
+                            print(f"[Chat] Generated {len(audio_chunks)} audio chunks for sentence")
+                            wav_data = tts_service.create_wav_data(audio_chunks)
+                            audio_b64 = base64.b64encode(wav_data).decode('utf-8')
+                            await websocket.send_json({
+                                "type": "audio",
+                                "content": audio_b64,
+                                "sentence": sentence
+                            })
+                            print(f"[Chat] Sent audio packet ({len(wav_data)} bytes)")
+                        else:
+                            print("[Chat] No audio chunks generated for sentence")
+                
+                remaining = sentence_buffer.flush()
+                if remaining:
+                    print(f"[Chat] Processing remaining text: '{remaining}'")
+                    audio_chunks, _ = tts_service.generate_audio_with_timing(remaining, ref_codes, ref_text)
+                    if audio_chunks:
+                        print(f"[Chat] Generated {len(audio_chunks)} audio chunks for remaining text")
+                        wav_data = tts_service.create_wav_data(audio_chunks)
+                        audio_b64 = base64.b64encode(wav_data).decode('utf-8')
+                        await websocket.send_json({
+                            "type": "audio",
+                            "content": audio_b64,
+                            "sentence": remaining
+                        })
+                        print(f"[Chat] Sent final audio packet ({len(wav_data)} bytes)")
+                
+                print("[Chat] Generation complete")
+                await websocket.send_json({"type": "done", "full_response": full_response})
+                
+            except Exception as e:
+                print(f"Error in chat generation: {e}")
+                import traceback
+                traceback.print_exc()
+                await websocket.send_json({"type": "error", "message": str(e)})
+    
+    except WebSocketDisconnect:
+        print("[Chat] WebSocket disconnected")
+    finally:
+        print("[Chat] Cleaning up chat resources... (Keeping models loaded)")
+        # llm_service.unload()
+        # tts_service.unload()
 
 
 @app.websocket("/ws/voice")
@@ -618,7 +707,6 @@ async def generate_greeting(websocket: WebSocket, voice: str, system_prompt: str
         print(f"Error in generate_greeting: {e}")
 
 
-@app.websocket("/")
 @app.websocket("/ws/esp32")
 async def websocket_esp32(websocket: WebSocket):
     """

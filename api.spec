@@ -4,6 +4,7 @@ from PyInstaller.utils.hooks import collect_all
 datas = [
     ('neuttsair', 'neuttsair'),
     ('index.html', '.'),
+    ('chat.html', '.'),
     ('/Users/akashdeepdeb/.pyenv/versions/3.11.11/lib/python3.11/site-packages/opuslib', 'opuslib'),
 ]
 binaries = []
