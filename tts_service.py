@@ -2,7 +2,6 @@ import os
 import time
 import base64
 from typing import Optional, Dict, Any, Tuple
-import torch
 import numpy as np
 from fastapi import HTTPException
 from neuttsair.neuttsair.neutts import NeuTTSAir
@@ -18,7 +17,7 @@ class TTSService:
         if self.tts is None:
             print("Initializing NeuTTSAir...")
             self.tts = NeuTTSAir(
-                backbone_repo="neuphonic/neutts-air-q8-gguf",
+                backbone_repo="neuphonic/neutts-air-q4-gguf",
                 backbone_device="gpu",
                 codec_repo="neuphonic/neucodec-onnx-decoder",
                 codec_device="cpu"
@@ -27,14 +26,14 @@ class TTSService:
             
             print("Caching reference audio data...")
             for voice in ["dave", "jo"]:
-                ref_codes_path = f"./neuttsair/samples/{voice}.pt"
+                ref_codes_path = f"./neuttsair/samples/{voice}.npy"
                 ref_text_path = f"./neuttsair/samples/{voice}.txt"
                 
                 ref_codes = None
                 ref_text = None
                 
                 if os.path.exists(ref_codes_path):
-                    ref_codes = torch.load(ref_codes_path)
+                    ref_codes = np.load(ref_codes_path)
                 
                 if os.path.exists(ref_text_path):
                     with open(ref_text_path, "r") as f:
@@ -47,14 +46,14 @@ class TTSService:
             
             print("Reference data cached successfully!")
     
-    def get_cached_reference_data(self, voice: str) -> Tuple[Optional[torch.Tensor], Optional[str]]:
+    def get_cached_reference_data(self, voice: str) -> Tuple[Optional[np.ndarray], Optional[str]]:
         if voice not in self.reference_cache:
             return None, None
         
         ref_data = self.reference_cache[voice]
         return ref_data["ref_codes"], ref_data["ref_text"]
     
-    def get_reference_data(self, ref_codes_path: str, ref_text_path: str) -> Tuple[Optional[torch.Tensor], Optional[str]]:
+    def get_reference_data(self, ref_codes_path: str, ref_text_path: str) -> Tuple[Optional[np.ndarray], Optional[str]]:
         if "dave" in ref_codes_path:
             return self.get_cached_reference_data("dave")
         elif "jo" in ref_codes_path:
@@ -64,7 +63,12 @@ class TTSService:
         ref_text = None
         
         if ref_codes_path and os.path.exists(ref_codes_path):
-            ref_codes = torch.load(ref_codes_path)
+            if ref_codes_path.endswith('.npy'):
+                ref_codes = np.load(ref_codes_path)
+            else:
+                # Fallback for .pt files if needed
+                import torch
+                ref_codes = torch.load(ref_codes_path).numpy()
         
         if ref_text_path and os.path.exists(ref_text_path):
             with open(ref_text_path, "r") as f:
@@ -72,7 +76,7 @@ class TTSService:
         
         return ref_codes, ref_text
     
-    def generate_audio_with_timing(self, text: str, ref_codes: Optional[torch.Tensor], ref_text: Optional[str]) -> Tuple[list, Dict[str, Any]]:
+    def generate_audio_with_timing(self, text: str, ref_codes: Optional[np.ndarray], ref_text: Optional[str]) -> Tuple[list, Dict[str, Any]]:
         start_time = time.time()
         first_chunk_time = None
         total_chunks = 0

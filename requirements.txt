@@ -11,3 +11,4 @@ onnxruntime
 fastapi[standard]
 uvicorn
 pydub
+websockets

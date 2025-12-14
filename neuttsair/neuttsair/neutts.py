@@ -1,10 +1,16 @@
-from typing import Generator
+from typing import Generator, Union, Any
 from pathlib import Path
 import librosa
 import numpy as np
-import torch
 import re
 import perth
+
+try:
+    import torch
+    TORCH_AVAILABLE = True
+except ImportError:
+    torch = None
+    TORCH_AVAILABLE = False
 from neucodec import NeuCodec, DistillNeuCodec
 from phonemizer.backend import EspeakBackend
 from transformers import AutoTokenizer, AutoModelForCausalLM, TextIteratorStreamer
@@ -100,11 +106,13 @@ class NeuTTSAir:
                 n_gpu_layers=-1 if backbone_device == "gpu" else 0,
                 n_ctx=self.max_context,
                 mlock=True,
-                flash_attn=True if backbone_device == "gpu" else False,
+                flash_attn=False,
             )
             self._is_quantized_model = True
 
         else:
+            if not TORCH_AVAILABLE:
+                raise RuntimeError("torch is required for non-GGUF models. Use a GGUF model or install torch.")
             self.tokenizer = AutoTokenizer.from_pretrained(backbone_repo)
             self.backbone = AutoModelForCausalLM.from_pretrained(backbone_repo).to(
                 torch.device(backbone_device)
@@ -143,7 +151,7 @@ class NeuTTSAir:
                     " 'neuphonic/neucodec-onnx-decoder'."
                 )
 
-    def infer(self, text: str, ref_codes: np.ndarray | torch.Tensor, ref_text: str) -> np.ndarray:
+    def infer(self, text: str, ref_codes: np.ndarray, ref_text: str) -> np.ndarray:
         """
         Perform inference to generate speech from text using the TTS model and reference audio.
 
@@ -168,7 +176,7 @@ class NeuTTSAir:
 
         return watermarked_wav
     
-    def infer_stream(self, text: str, ref_codes: np.ndarray | torch.Tensor, ref_text: str) -> Generator[np.ndarray, None, None]:
+    def infer_stream(self, text: str, ref_codes: np.ndarray, ref_text: str) -> Generator[np.ndarray, None, None]:
         """
         Perform streaming inference to generate speech from text using the TTS model and reference audio.
 
@@ -187,6 +195,8 @@ class NeuTTSAir:
             raise NotImplementedError("Streaming is not implemented for the torch backend!")
 
     def encode_reference(self, ref_audio_path: str | Path):
+        if not TORCH_AVAILABLE:
+            raise RuntimeError("torch is required to encode new reference audio. Install with: pip install torch")
         wav, _ = librosa.load(ref_audio_path, sr=16000, mono=True)
         wav_tensor = torch.from_numpy(wav).float().unsqueeze(0).unsqueeze(0)  # [1, 1, T]
         with torch.no_grad():
@@ -207,6 +217,8 @@ class NeuTTSAir:
 
             # Torch decode
             else:
+                if not TORCH_AVAILABLE:
+                    raise RuntimeError("torch is required for non-ONNX codec. Use 'neuphonic/neucodec-onnx-decoder' or install torch.")
                 with torch.no_grad():
                     codes = torch.tensor(speech_ids, dtype=torch.long)[None, None, :].to(
                         self.codec.device
@@ -255,6 +267,8 @@ class NeuTTSAir:
         return ids
 
     def _infer_torch(self, prompt_ids: list[int]) -> str:
+        if not TORCH_AVAILABLE:
+            raise RuntimeError("torch is required for non-GGUF models. Use a GGUF model or install torch.")
         prompt_tensor = torch.tensor(prompt_ids).unsqueeze(0).to(self.backbone.device)
         speech_end_id = self.tokenizer.convert_tokens_to_ids("<|SPEECH_GENERATION_END|>")
         with torch.no_grad():
@@ -293,7 +307,7 @@ class NeuTTSAir:
         output_str = output["choices"][0]["text"]
         return output_str
 
-    def _infer_stream_ggml(self, ref_codes: torch.Tensor, ref_text: str, input_text: str) -> Generator[np.ndarray, None, None]:
+    def _infer_stream_ggml(self, ref_codes: np.ndarray, ref_text: str, input_text: str) -> Generator[np.ndarray, None, None]:
         ref_text = self._to_phones(ref_text)
         input_text = self._to_phones(input_text)
 
