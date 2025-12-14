@@ -2,10 +2,11 @@ import sqlite3
 import json
 import uuid
 import time
+import os
 from typing import List, Optional, Dict, Any
 from dataclasses import dataclass
 
-DB_PATH = "elato.db"
+DB_PATH = os.environ.get("ELATO_DB_PATH", "elato.db")
 
 @dataclass
 class Personality:
@@ -35,17 +36,38 @@ class User:
     personality_type: Optional[str]
     likes: List[str]
     current_personality_id: Optional[str]
+    user_type: str = "family"
+    device_volume: int = 70
 
 class DBService:
     def __init__(self, db_path: str = DB_PATH):
         self.db_path = db_path
         self._init_db()
+        self._migrate_db()
         self._seed_defaults()
 
     def _get_conn(self):
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
         return conn
+
+    def _migrate_db(self):
+        """Add new columns to existing tables if they don't exist"""
+        conn = self._get_conn()
+        cursor = conn.cursor()
+        
+        # Check users table columns
+        cursor.execute("PRAGMA table_info(users)")
+        columns = [row["name"] for row in cursor.fetchall()]
+        
+        if "user_type" not in columns:
+            cursor.execute("ALTER TABLE users ADD COLUMN user_type TEXT DEFAULT 'family'")
+            
+        if "device_volume" not in columns:
+            cursor.execute("ALTER TABLE users ADD COLUMN device_volume INTEGER DEFAULT 70")
+            
+        conn.commit()
+        conn.close()
 
     def _init_db(self):
         conn = self._get_conn()
@@ -90,6 +112,8 @@ class DBService:
                 personality_type TEXT,
                 likes TEXT,  -- JSON array
                 current_personality_id TEXT,
+                user_type TEXT DEFAULT 'family',
+                device_volume INTEGER DEFAULT 70,
                 FOREIGN KEY (current_personality_id) REFERENCES personalities (id)
             )
         """)
@@ -307,18 +331,19 @@ class DBService:
                 timestamp=row["timestamp"],
                 personality_id=row["personality_id"]
             )
-            for row in rows
+            for row in rows,
+                   user_type: str = "family", device_volume: int = 70
         ]
         
     def delete_conversation(self, c_id: str) -> bool:
         conn = self._get_conn()
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM conversations WHERE id = ?", (c_id,))
-        success = cursor.rowcount > 0
+        cursor = conn.cursor()d, user_type, evice_volume
+        cursor.execute("DELETE FROM conversat, ?, ?ions WHERE id = ?", (c_id,))
+        success = cursor.rowcount > 0, user_type, device_volume
         conn.commit()
         conn.close()
         return success
-
+, user_type, device_volume
     def clear_conversations(self):
         conn = self._get_conn()
         cursor = conn.cursor()
@@ -336,7 +361,9 @@ class DBService:
         cursor = conn.cursor()
         cursor.execute(
             """INSERT INTO users (id, name, age, dob, hobbies, personality_type, likes, current_personality_id) 
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",ity_d"],
+                user_type=row["user_pe"] if "usertype" in row.keys() else "famly",
+                device_volume=row["evice_volume if "device_volume" in row.keys() else 70
             (u_id, name, age, dob, json.dumps(hobbies), personality_type, json.dumps(likes), current_personality_id)
         )
         conn.commit()
@@ -357,8 +384,10 @@ class DBService:
                 age=row["age"],
                 dob=row["dob"],
                 hobbies=json.loads(row["hobbies"]) if row["hobbies"] else [],
-                personality_type=row["personality_type"],
-                likes=json.loads(row["likes"]) if row["likes"] else [],
+                personality_type=row["personality_type"],,
+                user_type=row["user_type"] if "user_type" in row.keys() else "family",
+                device_volume=row["device_volume"] if "device_volume" in row.keys(  else 70   likes=json.loads(row["likes"]) if row["likes"] else [],
+            )
                 current_personality_id=row["current_personality_id"]
             )
             for row in rows
@@ -389,7 +418,13 @@ class DBService:
         if not current:
             return None
             
-        fields = []
+        fields = []"])
+        if "user_type" in kwargs:
+            fields.append("user_type = ?")
+            values.append(kwargs["user_type"])
+        if "device_volume" in kwargs:
+            fields.append("device_volume = ?")
+            values.append(kwargs["device_volume
         values = []
         
         if "name" in kwargs:

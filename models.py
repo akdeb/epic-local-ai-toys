@@ -47,6 +47,8 @@ class UserCreate(BaseModel):
     personality_type: Optional[str] = None
     likes: list[str] = []
     current_personality_id: Optional[str] = None
+    user_type: Optional[str] = "family"  # family | friend | guest
+    device_volume: Optional[int] = 70
 
 class UserUpdate(BaseModel):
     name: Optional[str] = None
@@ -56,4 +58,6 @@ class UserUpdate(BaseModel):
     personality_type: Optional[str] = None
     likes: Optional[list[str]] = None
     current_personality_id: Optional[str] = None
+    user_type: Optional[str] = None
+    device_volume: Optional[int] = None
 

@@ -131,7 +131,9 @@ async def create_user(u: UserCreate):
         hobbies=u.hobbies,
         personality_type=u.personality_type,
         likes=u.likes,
-        current_personality_id=u.current_personality_id
+        current_personality_id=u.current_personality_id,
+        user_type=u.user_type,
+        device_volume=u.device_volume
     )
 
 @app.get("/users")
