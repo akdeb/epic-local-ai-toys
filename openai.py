@@ -255,6 +255,7 @@ async def websocket_voice(websocket: WebSocket):
     
     voice = "dave"
     system_prompt = "You are a helpful voice assistant. Be concise."
+    greeted = False
     
     try:
         while True:
@@ -264,6 +265,15 @@ async def websocket_voice(websocket: WebSocket):
                 break
             
             if "bytes" in message:
+                # Send greeting on first audio received
+                if not greeted:
+                    greeted = True
+                    await websocket.send_json({"type": "pause_mic"})
+                    await generate_greeting(websocket, voice, system_prompt, is_esp32=False)
+                    await websocket.send_json({"type": "resume_mic"})
+                    stt_service.reset()
+                    continue
+                
                 # Process audio chunk
                 audio_bytes = message["bytes"]
                 audio = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
@@ -341,6 +351,208 @@ async def websocket_voice(websocket: WebSocket):
                     
     except WebSocketDisconnect:
         print("Voice WebSocket disconnected")
+    finally:
+        stt_service.reset()
+
+
+async def generate_greeting(websocket: WebSocket, voice: str, system_prompt: str, is_esp32: bool = False):
+    """Generate and send initial greeting from the assistant."""
+    ref_codes, ref_text = tts_service.get_cached_reference_data(voice)
+    if ref_codes is None:
+        return
+    
+    greeting_prompt = "The user just connected. Greet them warmly and briefly ask how you can help."
+    
+    sentence_buffer = SentenceBuffer()
+    full_response = ""
+    first_audio = True
+    
+    for token in llm_service.generate_stream(greeting_prompt, system_prompt):
+        full_response += token
+        
+        if not is_esp32:
+            await websocket.send_json({"type": "token", "content": token})
+        
+        for sentence in sentence_buffer.add(token):
+            if len(sentence.strip()) < 3:
+                continue
+            
+            if is_esp32 and first_audio:
+                await websocket.send_json({"type": "server", "msg": "RESPONSE.CREATED"})
+                first_audio = False
+            
+            try:
+                audio_chunks, _ = tts_service.generate_audio_with_timing(sentence, ref_codes, ref_text)
+                if audio_chunks:
+                    if is_esp32:
+                        pcm_data = np.concatenate(audio_chunks)
+                        pcm_16bit = (pcm_data * 32767).astype(np.int16)
+                        await websocket.send_bytes(pcm_16bit.tobytes())
+                    else:
+                        wav_data = tts_service.create_wav_data(audio_chunks)
+                        await websocket.send_json({
+                            "type": "audio",
+                            "content": base64.b64encode(wav_data).decode('utf-8'),
+                            "sentence": sentence
+                        })
+            except Exception as e:
+                print(f"Greeting TTS error: {e}")
+    
+    remaining = sentence_buffer.flush()
+    if remaining and len(remaining.strip()) >= 3:
+        try:
+            audio_chunks, _ = tts_service.generate_audio_with_timing(remaining, ref_codes, ref_text)
+            if audio_chunks:
+                if is_esp32:
+                    pcm_data = np.concatenate(audio_chunks)
+                    pcm_16bit = (pcm_data * 32767).astype(np.int16)
+                    await websocket.send_bytes(pcm_16bit.tobytes())
+                else:
+                    wav_data = tts_service.create_wav_data(audio_chunks)
+                    await websocket.send_json({
+                        "type": "audio",
+                        "content": base64.b64encode(wav_data).decode('utf-8'),
+                        "sentence": remaining
+                    })
+        except Exception as e:
+            print(f"Greeting TTS error: {e}")
+    
+    if is_esp32:
+        await websocket.send_json({"type": "server", "msg": "RESPONSE.COMPLETE"})
+    else:
+        await websocket.send_json({"type": "done", "full_response": full_response})
+    
+    print(f"[Greeting] {full_response}")
+
+
+@app.websocket("/ws/esp32")
+async def websocket_esp32(websocket: WebSocket):
+    """
+    ESP32 voice pipeline endpoint.
+    - Receives: 16-bit PCM audio at 16kHz
+    - Sends: Opus-encoded audio + JSON control messages
+    """
+    await websocket.accept()
+    
+    voice = "dave"
+    system_prompt = "You are a helpful voice assistant. Be concise and conversational."
+    input_sample_rate = 16000  # ESP32 mic sample rate
+    
+    # Send auth response
+    await websocket.send_json({
+        "type": "auth",
+        "volume_control": 70,
+        "pitch_factor": 1.0,
+        "is_ota": False,
+        "is_reset": False
+    })
+    
+    print("[ESP32] Client connected")
+    
+    # Send initial greeting
+    await generate_greeting(websocket, voice, system_prompt, is_esp32=True)
+    
+    try:
+        while True:
+            message = await websocket.receive()
+            
+            if message.get("type") == "websocket.disconnect":
+                break
+            
+            if "bytes" in message:
+                # Process PCM audio from ESP32 (16-bit, 16kHz)
+                audio_bytes = message["bytes"]
+                audio_16k = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+                
+                # Resample 16kHz -> 24kHz for STT
+                ratio = 24000 / input_sample_rate
+                output_len = int(len(audio_16k) * ratio)
+                audio_24k = np.zeros(output_len, dtype=np.float32)
+                for i in range(output_len):
+                    src_idx = i / ratio
+                    idx0 = int(src_idx)
+                    idx1 = min(idx0 + 1, len(audio_16k) - 1)
+                    frac = src_idx - idx0
+                    audio_24k[i] = audio_16k[idx0] * (1 - frac) + audio_16k[idx1] * frac
+                
+                # Process through STT
+                result = stt_service.process_audio_chunk(audio_24k, use_vad=True)
+                
+                if result and result.is_final:
+                    print(f"[ESP32] Transcript: {result.text}")
+                    
+                    # Notify audio committed
+                    await websocket.send_json({"type": "server", "msg": "AUDIO.COMMITTED"})
+                    
+                    # Get TTS reference data
+                    ref_codes, ref_text = tts_service.get_cached_reference_data(voice)
+                    if ref_codes is None:
+                        await websocket.send_json({"type": "server", "msg": "RESPONSE.ERROR"})
+                        stt_service.reset()
+                        continue
+                    
+                    # Generate LLM response
+                    sentence_buffer = SentenceBuffer()
+                    full_response = ""
+                    
+                    for token in llm_service.generate_stream(result.text, system_prompt):
+                        full_response += token
+                        
+                        for sentence in sentence_buffer.add(token):
+                            if len(sentence.strip()) < 3:
+                                continue
+                            
+                            # Notify response created (first audio)
+                            if not hasattr(websocket, '_sent_response_created'):
+                                await websocket.send_json({"type": "server", "msg": "RESPONSE.CREATED"})
+                                websocket._sent_response_created = True
+                            
+                            try:
+                                audio_chunks, _ = tts_service.generate_audio_with_timing(sentence, ref_codes, ref_text)
+                                if audio_chunks:
+                                    # Combine chunks and send as raw PCM (ESP32 expects Opus but we'll send PCM for now)
+                                    pcm_data = np.concatenate(audio_chunks)
+                                    pcm_16bit = (pcm_data * 32767).astype(np.int16)
+                                    await websocket.send_bytes(pcm_16bit.tobytes())
+                            except Exception as e:
+                                print(f"[ESP32] TTS error: {e}")
+                    
+                    # Flush remaining text
+                    remaining = sentence_buffer.flush()
+                    if remaining and len(remaining.strip()) >= 3:
+                        if not hasattr(websocket, '_sent_response_created'):
+                            await websocket.send_json({"type": "server", "msg": "RESPONSE.CREATED"})
+                            websocket._sent_response_created = True
+                        
+                        try:
+                            audio_chunks, _ = tts_service.generate_audio_with_timing(remaining, ref_codes, ref_text)
+                            if audio_chunks:
+                                pcm_data = np.concatenate(audio_chunks)
+                                pcm_16bit = (pcm_data * 32767).astype(np.int16)
+                                await websocket.send_bytes(pcm_16bit.tobytes())
+                        except Exception as e:
+                            print(f"[ESP32] TTS error: {e}")
+                    
+                    # Notify response complete
+                    await websocket.send_json({"type": "server", "msg": "RESPONSE.COMPLETE"})
+                    delattr(websocket, '_sent_response_created') if hasattr(websocket, '_sent_response_created') else None
+                    
+                    print(f"[ESP32] Response: {full_response}")
+                    stt_service.reset()
+                    
+            elif "text" in message:
+                # Handle JSON config messages
+                try:
+                    data = json.loads(message["text"])
+                    if "voice" in data:
+                        voice = data["voice"]
+                    if "system_prompt" in data:
+                        system_prompt = data["system_prompt"]
+                except:
+                    pass
+                    
+    except WebSocketDisconnect:
+        print("[ESP32] Client disconnected")
     finally:
         stt_service.reset()
 
