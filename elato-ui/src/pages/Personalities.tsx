@@ -43,7 +43,11 @@ export const Personalities = () => {
       setError(null);
       await api.updateUser(activeUserId, { current_personality_id: personalityId });
       await refreshUsers();
-      await api.setAppMode('chat');
+      try {
+        await api.setAppMode('chat');
+      } catch {
+        // non-blocking: selection should still work even if app-mode endpoint is unavailable
+      }
     } catch (e: any) {
       setError(e?.message || 'Failed to assign personality');
     }

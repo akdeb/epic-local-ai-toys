@@ -1,7 +1,7 @@
 export const Settings = () => {
   return (
     <div>
-      <h2 className="text-3xl font-black mb-8">SYSTEM CONFIG</h2>
+      <h2 className="text-3xl font-black mb-8">AI SETTINGS</h2>
       
       <div className="retro-card space-y-6">
         <div>

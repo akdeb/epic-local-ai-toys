@@ -47,7 +47,7 @@ except Exception as e:
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, FileResponse
-from models import TextRequest, OpenAISpeechRequest, PersonalityCreate, PersonalityUpdate, UserCreate, UserUpdate, ActiveUserState, AppModeState, ModelsUpdate
+from models import TextRequest, OpenAISpeechRequest, PersonalityCreate, PersonalityUpdate, UserCreate, UserUpdate, ActiveUserState, AppModeState
 from tts_service import tts_service
 from llm_service import llm_service
 from stt_service import stt_service
@@ -154,42 +154,6 @@ async def list_sessions(limit: int = 50, offset: int = 0):
 @app.get("/device-status")
 async def get_device_status():
     return db_service.get_device_status()
-
-@app.get("/models")
-async def get_models():
-    return {
-        "llm": {
-            "backend": "llama.cpp",
-            "repo": llm_service.model_repo,
-            "file": llm_service.model_file,
-            "context_window": 2048,
-            "loaded": llm_service.is_initialized(),
-        },
-        "tts": {
-            "backend": "NeuTTSAir",
-            "backbone_repo": "neuphonic/neutts-air-q4-gguf",
-            "codec_repo": "neuphonic/neucodec-onnx-decoder",
-            "loaded": tts_service.is_initialized(),
-        },
-    }
-
-@app.put("/models")
-async def set_models(payload: ModelsUpdate):
-    changed = False
-    if payload.model_repo and payload.model_repo != llm_service.model_repo:
-        llm_service.model_repo = payload.model_repo
-        changed = True
-    if payload.model_file and payload.model_file != llm_service.model_file:
-        llm_service.model_file = payload.model_file
-        changed = True
-
-    if changed:
-        try:
-            llm_service.unload()
-        except Exception:
-            pass
-
-    return await get_models()
 
 @app.delete("/conversations/{c_id}")
 async def delete_conversation(c_id: str):
@@ -631,7 +595,7 @@ async def websocket_chat(websocket: WebSocket):
 async def websocket_voice(websocket: WebSocket):
     """Voice chat: audio in -> STT -> LLM -> TTS -> audio out"""
     await websocket.accept()
-    
+
     # Lazy init on connection
     if not stt_service.is_initialized():
         print("Initializing STT for voice chat...")

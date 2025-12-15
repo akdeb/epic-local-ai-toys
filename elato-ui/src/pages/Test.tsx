@@ -16,20 +16,24 @@ type VoiceMsg =
 export const TestPage = () => {
   const { activeUser } = useActiveUser();
 
-  const [status, setStatus] = useState<string>("disconnected");
+  const [status, setStatus] = useState<string>("connecting");
   const [error, setError] = useState<string | null>(null);
   const [voice, setVoice] = useState<string>("dave");
   const [systemPrompt, setSystemPrompt] = useState<string>("You are a helpful voice assistant. Be concise.");
+  const [characterName, setCharacterName] = useState<string>("—");
 
   const [isRecording, setIsRecording] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
   const isRecordingRef = useRef(false);
   const isPausedRef = useRef(false);
 
-  const [finalTranscript, setFinalTranscript] = useState<string>("");
-  const [assistantText, setAssistantText] = useState<string>("");
+  const [micLevel, setMicLevel] = useState<number>(0);
+  const lastLevelAtRef = useRef<number>(0);
+  const [isSpeaking, setIsSpeaking] = useState<boolean>(false);
 
   const wsRef = useRef<WebSocket | null>(null);
+  const connectNonceRef = useRef(0);
+  const connectTimeoutRef = useRef<number | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
   const processorRef = useRef<ScriptProcessorNode | null>(null);
@@ -51,15 +55,18 @@ export const TestPage = () => {
     if (!next) return;
 
     isPlayingRef.current = true;
+    setIsSpeaking(true);
     try {
       const audio = new Audio(`data:audio/wav;base64,${next}`);
       await audio.play();
       audio.onended = () => {
         isPlayingRef.current = false;
+        setIsSpeaking(false);
         playNextAudio();
       };
     } catch {
       isPlayingRef.current = false;
+      setIsSpeaking(false);
     }
   };
 
@@ -72,6 +79,7 @@ export const TestPage = () => {
         const selectedId = activeUser?.current_personality_id;
         const selected = ps.find((p: any) => p.id === selectedId);
         if (!cancelled && selected) {
+          setCharacterName(selected.name || "—");
           setVoice(selected.voice_id || "dave");
           setSystemPrompt(selected.prompt || "You are a helpful voice assistant. Be concise.");
         }
@@ -154,6 +162,18 @@ export const TestPage = () => {
 
       const input = e.inputBuffer.getChannelData(0);
 
+      let sumSq = 0;
+      for (let i = 0; i < input.length; i++) {
+        const v = input[i] || 0;
+        sumSq += v * v;
+      }
+      const rms = Math.sqrt(sumSq / Math.max(1, input.length));
+      const now = performance.now();
+      if (now - lastLevelAtRef.current > 80) {
+        lastLevelAtRef.current = now;
+        setMicLevel(Math.min(1, rms * 6));
+      }
+
       const ratio = 24000 / actualRate;
       const outputLen = Math.round(input.length * ratio);
       const resampled = new Float32Array(outputLen);
@@ -187,11 +207,53 @@ export const TestPage = () => {
     }
   };
 
-  useEffect(() => {
-    const ws = new WebSocket(wsUrl);
+  const connectWs = () => {
+    connectNonceRef.current += 1;
+    const nonce = connectNonceRef.current;
+
+    try {
+      wsRef.current?.close();
+    } catch {
+      // ignore
+    }
+
+    if (connectTimeoutRef.current) {
+      window.clearTimeout(connectTimeoutRef.current);
+      connectTimeoutRef.current = null;
+    }
+
+    setError(null);
+    setStatus("connecting");
+
+    let ws: WebSocket;
+    try {
+      ws = new WebSocket(wsUrl);
+    } catch (e: any) {
+      setStatus("error");
+      setError(e?.message || `Failed to create WebSocket: ${wsUrl}`);
+      return;
+    }
+
     wsRef.current = ws;
 
+    connectTimeoutRef.current = window.setTimeout(() => {
+      if (nonce !== connectNonceRef.current) return;
+      if (ws.readyState === WebSocket.OPEN) return;
+      try {
+        ws.close();
+      } catch {
+        // ignore
+      }
+      setStatus("error");
+      setError(`Can't connect to voice server (${wsUrl}). Is the Python sidecar running on port 8000?`);
+    }, 6000);
+
     ws.onopen = () => {
+      if (nonce !== connectNonceRef.current) return;
+      if (connectTimeoutRef.current) {
+        window.clearTimeout(connectTimeoutRef.current);
+        connectTimeoutRef.current = null;
+      }
       setStatus("connected");
       try {
         ws.send(JSON.stringify({ voice, system_prompt: systemPrompt }));
@@ -199,22 +261,33 @@ export const TestPage = () => {
         // ignore
       }
     };
+
     ws.onclose = () => {
+      if (nonce !== connectNonceRef.current) return;
+      if (connectTimeoutRef.current) {
+        window.clearTimeout(connectTimeoutRef.current);
+        connectTimeoutRef.current = null;
+      }
       setStatus("disconnected");
       stopRecording();
     };
-    ws.onerror = () => setStatus("error");
+
+    ws.onerror = () => {
+      if (nonce !== connectNonceRef.current) return;
+      if (connectTimeoutRef.current) {
+        window.clearTimeout(connectTimeoutRef.current);
+        connectTimeoutRef.current = null;
+      }
+      setStatus("error");
+      setError(`Voice WebSocket error (${wsUrl}).`);
+      stopRecording();
+    };
 
     ws.onmessage = (ev) => {
       try {
         const msg = JSON.parse(ev.data) as VoiceMsg;
 
-        if (msg.type === "transcript" && msg.is_final) {
-          setFinalTranscript(msg.text || "");
-          setAssistantText("");
-        } else if (msg.type === "token") {
-          setAssistantText((t) => t + (msg.content || ""));
-        } else if (msg.type === "audio") {
+        if (msg.type === "audio") {
           if (msg.content) {
             audioQueueRef.current.push(msg.content);
             playNextAudio();
@@ -222,6 +295,7 @@ export const TestPage = () => {
         } else if (msg.type === "pause_mic") {
           isPausedRef.current = true;
           setIsPaused(true);
+          setMicLevel(0);
         } else if (msg.type === "resume_mic") {
           isPausedRef.current = false;
           setIsPaused(false);
@@ -232,10 +306,18 @@ export const TestPage = () => {
         // ignore
       }
     };
+  };
+
+  useEffect(() => {
+    connectWs();
 
     return () => {
+      if (connectTimeoutRef.current) {
+        window.clearTimeout(connectTimeoutRef.current);
+        connectTimeoutRef.current = null;
+      }
       try {
-        ws.close();
+        wsRef.current?.close();
       } catch {
         // ignore
       }
@@ -253,51 +335,63 @@ export const TestPage = () => {
     }
   }, [voice, systemPrompt]);
 
+  const statusDotClass =
+    status === "connected" ? "bg-[#00c853]" : status === "error" ? "bg-red-500" : "bg-[#ffd400]";
+
+  const orbScale = useMemo(() => {
+    const base = isRecording ? 1.03 : 1;
+    const mic = isRecording && !isPaused ? micLevel * 0.18 : 0;
+    const speak = isSpeaking ? 0.08 : 0;
+    return base + mic + speak;
+  }, [isRecording, isPaused, micLevel, isSpeaking]);
+
   return (
     <div>
-      <div className="flex justify-between items-center mb-8">
-        <h2 className="text-3xl font-black">TEST</h2>
-        <div className="font-mono text-xs text-gray-500">{status}</div>
-      </div>
-
-      {error && <div className="retro-card font-mono text-sm mb-4">{error}</div>}
-
-      <div className="retro-card mb-4">
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <div>
-            <div className="font-bold uppercase text-xs mb-1">Voice</div>
-            <input className="retro-input w-full" value={voice} onChange={(e) => setVoice(e.target.value)} />
+      <div className="flex justify-between items-start mb-8">
+        <div>
+          <h2 className="text-3xl font-black">TEST</h2>
+          <div className="mt-2 font-mono text-xs text-gray-600">
+            Character: <span className="font-bold text-black">{characterName}</span>
           </div>
-          <div>
-            <div className="font-bold uppercase text-xs mb-1">System prompt</div>
-            <input
-              className="retro-input w-full"
-              value={systemPrompt}
-              onChange={(e) => setSystemPrompt(e.target.value)}
-            />
+          <div className="mt-1 font-mono text-xs text-gray-600 inline-flex items-center gap-2">
+            <span className={`w-2.5 h-2.5 rounded-full border border-black ${statusDotClass}`} />
+            <span className="capitalize">{status}</span>
+            {isRecording && (
+              <span className="text-gray-500">
+                • {isPaused ? "paused" : "listening"}
+              </span>
+            )}
           </div>
-        </div>
-
-        <div className="mt-4 flex items-center justify-between">
-          <div className="font-mono text-xs text-gray-600">
-            {isRecording ? (isPaused ? "paused" : "listening") : "mic off"}
-          </div>
-          <button type="button" className="retro-btn" onClick={toggleRecording}>
-            {isRecording ? "Stop" : "Start"}
-          </button>
+          {error && <div className="mt-3 font-mono text-xs text-red-700">{error}</div>}
         </div>
       </div>
 
-      <div className="retro-card">
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <div className="bg-white border border-black rounded-[18px] px-4 py-3 retro-shadow-sm">
-            <div className="text-xs font-bold uppercase tracking-wider mb-2">You</div>
-            <div className="font-mono text-sm text-gray-800 whitespace-pre-wrap">{finalTranscript || "—"}</div>
-          </div>
-          <div className="bg-white border border-black rounded-[18px] px-4 py-3 retro-shadow-sm">
-            <div className="text-xs font-bold uppercase tracking-wider mb-2">Assistant</div>
-            <div className="font-mono text-sm text-gray-800 whitespace-pre-wrap">{assistantText || "—"}</div>
-          </div>
+      <div className="flex flex-col items-center justify-center py-16">
+        <button
+          type="button"
+          className="rounded-full border-2 border-black shadow-[0_14px_30px_rgba(0,0,0,0.18)] bg-[#9b5cff] hover:shadow-[0_18px_40px_rgba(0,0,0,0.20)] transition-shadow"
+          onClick={() => {
+            if (status !== "connected") {
+              connectWs();
+              return;
+            }
+            void toggleRecording();
+          }}
+          aria-label={isRecording ? "Stop microphone" : "Start microphone"}
+          style={{
+            width: 148,
+            height: 148,
+            transform: `scale(${orbScale})`,
+            transition: "transform 80ms linear",
+            opacity: status === "connected" ? 1 : 0.7,
+          }}
+        />
+
+        <div className="mt-8 font-mono text-xs text-gray-600 text-center">
+          {status === "connecting" && "Connecting…"}
+          {status === "error" && "Click to retry"}
+          {status === "disconnected" && "Click to reconnect"}
+          {status === "connected" && (isRecording ? "Click to stop" : "Click to start")}
         </div>
       </div>
     </div>

@@ -106,17 +106,6 @@ export const Sidebar = () => {
         <NavItem to="/users" icon={Users} label="Users" />
         <NavItem to="/settings" icon={Settings} label="AI Settings" />
       </nav>
-
-      <Link to="/models" className="mt-auto p-4 border-2 border-black bg-white rounded-[24px] hover:bg-[#fff3b0] transition-colors">
-        <div className="flex items-center gap-2 mb-2">
-          <div className="w-3 h-3 rounded-full bg-green-500 border border-black"></div>
-          <span className="text-xs font-bold">AI MODELS</span>
-        </div>
-        <div className="text-[10px] font-mono text-gray-500">
-          LLM: llama.cpp<br/>
-          TTS: NeuTTSAir
-        </div>
-      </Link>
     </div>
   );
 };

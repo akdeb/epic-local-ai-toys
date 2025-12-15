@@ -12,14 +12,20 @@ const request = async (path: string, init?: RequestInit) => {
           (typeof data?.message === "string" && data.message) ||
           (typeof data?.error === "string" && data.error) ||
           "";
-        throw new Error(msg || `Request failed: ${res.status}`);
+        const err: any = new Error(msg || `Request failed: ${res.status}`);
+        err.status = res.status;
+        throw err;
       } catch (e: any) {
-        throw new Error(e?.message || `Request failed: ${res.status}`);
+        const err: any = new Error(e?.message || `Request failed: ${res.status}`);
+        err.status = res.status;
+        throw err;
       }
     }
 
     const text = await res.text().catch(() => "");
-    throw new Error(text || `Request failed: ${res.status}`);
+    const err: any = new Error(text || `Request failed: ${res.status}`);
+    err.status = res.status;
+    throw err;
   }
   return res.json();
 };
@@ -109,17 +115,5 @@ export const api = {
 
   getDeviceStatus: async () => {
     return request(`/device-status`);
-  },
-
-  getModels: async () => {
-    return request(`/models`);
-  },
-
-  setModels: async (data: { model_repo?: string; model_file?: string }) => {
-    return request(`/models`, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(data),
-    });
   },
 };

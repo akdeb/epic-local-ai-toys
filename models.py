@@ -47,11 +47,6 @@ class AppModeState(BaseModel):
     mode: Optional[str] = None
 
 
-class ModelsUpdate(BaseModel):
-    model_repo: Optional[str] = None
-    model_file: Optional[str] = None
-
-
 class UserCreate(BaseModel):
     name: str
     age: Optional[int] = None

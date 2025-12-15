@@ -1,9 +1,10 @@
 import { useEffect, useState } from 'react';
 import { api } from '../api';
 import { Bot, User, ArrowLeft } from 'lucide-react';
-import { useSearchParams } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 
 export const Conversations = () => {
+  const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const [sessions, setSessions] = useState<any[]>([]);
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
@@ -19,7 +20,12 @@ export const Conversations = () => {
       const data = await api.getSessions(100, 0);
       setSessions(data);
     } catch (e: any) {
-      setError(e?.message || 'Failed to load conversations');
+      if (e?.status === 404) {
+        setSessions([]);
+        setError(null);
+      } else {
+        setError(e?.message || 'Failed to load conversations');
+      }
     } finally {
       setLoading(false);
     }
@@ -34,7 +40,14 @@ export const Conversations = () => {
         const data = await api.getSessions(100, 0);
         if (!cancelled) setSessions(data);
       } catch (e: any) {
-        if (!cancelled) setError(e?.message || 'Failed to load conversations');
+        if (!cancelled) {
+          if (e?.status === 404) {
+            setSessions([]);
+            setError(null);
+          } else {
+            setError(e?.message || 'Failed to load conversations');
+          }
+        }
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -150,8 +163,19 @@ export const Conversations = () => {
           ))}
 
           {sessions.length === 0 && (
-            <div className="p-8 text-center font-mono text-gray-500 retro-card">
-              NO SESSIONS LOGGED
+            <div className="retro-card p-10 text-center">
+              <div className="text-xl font-black uppercase">No conversations yet</div>
+              <div className="font-mono text-sm text-gray-600 mt-3">
+                Chat with the models to create a conversation, then come back here to view it.
+              </div>
+              <div className="mt-6 flex items-center justify-center gap-3 flex-wrap">
+                <button type="button" className="retro-btn" onClick={() => navigate('/test')}>
+                  Open Test
+                </button>
+                <button type="button" className="retro-btn bg-white" onClick={loadSessions}>
+                  Refresh
+                </button>
+              </div>
             </div>
           )}
         </div>

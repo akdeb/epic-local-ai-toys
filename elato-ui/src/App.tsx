@@ -6,7 +6,6 @@ import { Conversations } from "./pages/Conversations";
 import { Settings } from "./pages/Settings";
 import { TestPage } from "./pages/Test";
 import { ChatModePage } from "./pages/ChatMode";
-import { ModelsPage } from "./pages/Models";
 import "./App.css";
 
 function App() {
@@ -19,7 +18,6 @@ function App() {
           <Route path="conversations" element={<Conversations />} />
           <Route path="test" element={<TestPage />} />
           <Route path="chat" element={<ChatModePage />} />
-          <Route path="models" element={<ModelsPage />} />
           <Route path="settings" element={<Settings />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Route>

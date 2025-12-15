@@ -12,6 +12,10 @@ export const Layout = () => {
   const [deviceConnected, setDeviceConnected] = useState<boolean>(false);
   const [deviceSessionId, setDeviceSessionId] = useState<string | null>(null);
 
+  const statusLabel = deviceConnected ? 'Chat in progress' : 'Ready to connect';
+  const statusDotClass = deviceConnected ? 'bg-[#00c853]' : 'bg-[#ffd400]';
+  const statusTextClass = deviceConnected ? 'text-green-800' : 'text-yellow-900';
+
   useEffect(() => {
     let cancelled = false;
 
@@ -56,15 +60,18 @@ export const Layout = () => {
         {activeUser?.current_personality_id && (
           <div className="fixed bottom-0 left-64 right-0 pointer-events-none">
             <div className="max-w-4xl mx-auto px-8 pb-6 pointer-events-auto">
-              <div className="bg-gray-50 border-2 rounded-2xl px-4 py-3 flex items-center justify-between shadow-2xl">
-                <div>
-                  <div className="font-mono text-xs text-gray-600">
-                    Active: <span className="font-bold text-black">{activePersonalityName || '—'}</span>
-                  </div>
-                  <div className="font-mono text-[11px] text-gray-500 mt-1">
-                    {deviceConnected ? 'Chat in progress' : 'Ready to connect'}
+              <div className="bg-white border-2 border-black rounded-[24px] px-5 py-4 flex items-center justify-between shadow-[0_10px_24px_rgba(0,0,0,0.14)]">
+                <div className="min-w-0">
+                  <div className="font-mono text-xs text-gray-500">Active</div>
+                  <div className="mt-0.5 flex items-center gap-3 min-w-0">
+                    <div className="font-black text-base text-black truncate">{activePersonalityName || '—'}</div>
+                    <div className="inline-flex items-center gap-2 font-mono text-[11px] shrink-0">
+                      <span className={`w-2 h-2 rounded-full border border-black ${statusDotClass}`} />
+                      <span className={statusTextClass}>{statusLabel}</span>
+                    </div>
                   </div>
                 </div>
+
                 <div className="flex items-center gap-3">
                   <button
                     type="button"
