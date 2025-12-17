@@ -23,7 +23,7 @@ def main():
     try:
         tts = NeuTTSAir(
             backbone_repo="neuphonic/neutts-air-q4-gguf",
-            backbone_device="cpu",
+            backbone_device="gpu",
             codec_repo="neuphonic/neucodec",
             codec_device="cpu"
         )

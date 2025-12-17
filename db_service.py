@@ -3,10 +3,31 @@ import json
 import uuid
 import time
 import os
+import glob
+import random
+import sys
+from pathlib import Path
 from typing import List, Optional, Dict, Any
 from dataclasses import dataclass
 
-DB_PATH = os.environ.get("ELATO_DB_PATH", "elato.db")
+def _argv_value(flag: str) -> Optional[str]:
+    try:
+        i = sys.argv.index(flag)
+    except ValueError:
+        return None
+    if i + 1 >= len(sys.argv):
+        return None
+    v = sys.argv[i + 1].strip()
+    return v if v else None
+
+DEFAULT_DB_PATH = os.path.join(os.getcwd(), "elato.db")
+
+DB_PATH = (
+    _argv_value("--db-path")
+    or _argv_value("--db_path")
+    or os.environ.get("ELATO_DB_PATH")
+    or DEFAULT_DB_PATH
+)
 
 @dataclass
 class Personality:
@@ -51,9 +72,16 @@ class Session:
 
 class DBService:
     def __init__(self, db_path: str = DB_PATH):
+        if not db_path:
+            db_path = DEFAULT_DB_PATH
         self.db_path = db_path
-        self._init_db()
-        self._migrate_db()
+        if self.db_path != ":memory:":
+            try:
+                Path(self.db_path).expanduser().parent.mkdir(parents=True, exist_ok=True)
+            except Exception:
+                pass
+        self._maybe_reset_db()
+        self._apply_migrations()
         self._seed_defaults()
 
     def _get_conn(self):
@@ -61,101 +89,52 @@ class DBService:
         conn.row_factory = sqlite3.Row
         return conn
 
-    def _migrate_db(self):
-        """Add new columns to existing tables if they don't exist"""
+    def _maybe_reset_db(self) -> None:
+        if os.environ.get("ELATO_WIPE_DB", "0") != "1":
+            return
+        try:
+            if os.path.exists(self.db_path):
+                os.remove(self.db_path)
+            wal = f"{self.db_path}-wal"
+            shm = f"{self.db_path}-shm"
+            if os.path.exists(wal):
+                os.remove(wal)
+            if os.path.exists(shm):
+                os.remove(shm)
+        except Exception:
+            pass
+
+    def _apply_migrations(self) -> None:
+        migrations_dir = os.environ.get(
+            "ELATO_MIGRATIONS_DIR",
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "migrations"),
+        )
+
         conn = self._get_conn()
         cursor = conn.cursor()
-        
-        # Check users table columns
-        cursor.execute("PRAGMA table_info(users)")
-        columns = [row["name"] for row in cursor.fetchall()]
-        
-        if "user_type" not in columns:
-            cursor.execute("ALTER TABLE users ADD COLUMN user_type TEXT DEFAULT 'family'")
-            
-        if "device_volume" not in columns:
-            cursor.execute("ALTER TABLE users ADD COLUMN device_volume INTEGER DEFAULT 70")
 
-        # Check conversations table columns
-        cursor.execute("PRAGMA table_info(conversations)")
-        convo_columns = [row["name"] for row in cursor.fetchall()]
-        if "session_id" not in convo_columns:
-            cursor.execute("ALTER TABLE conversations ADD COLUMN session_id TEXT")
-
-        conn.commit()
-        conn.close()
-
-    def _init_db(self):
-        conn = self._get_conn()
-        cursor = conn.cursor()
-        
-        # Enable WAL mode for better concurrency
         cursor.execute("PRAGMA journal_mode=WAL;")
+        cursor.execute(
+            "CREATE TABLE IF NOT EXISTS schema_migrations (version TEXT PRIMARY KEY, applied_at REAL NOT NULL)"
+        )
 
-        # App state table (simple key/value store)
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS app_state (
-                key TEXT PRIMARY KEY,
-                value TEXT
-            )
-        """)
+        cursor.execute("SELECT version FROM schema_migrations")
+        applied = {row["version"] for row in cursor.fetchall()}
 
-        # Sessions table
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS sessions (
-                id TEXT PRIMARY KEY,
-                started_at REAL NOT NULL,
-                ended_at REAL,
-                duration_sec REAL,
-                client_type TEXT NOT NULL,
-                user_id TEXT,
-                personality_id TEXT,
-                FOREIGN KEY (user_id) REFERENCES users (id),
-                FOREIGN KEY (personality_id) REFERENCES personalities (id)
+        files = sorted(glob.glob(os.path.join(migrations_dir, "*.sql")))
+        for path in files:
+            version = os.path.basename(path)
+            if version in applied:
+                continue
+            with open(path, "r", encoding="utf-8") as f:
+                sql = f.read().strip()
+            if sql:
+                cursor.executescript(sql)
+            cursor.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+                (version, time.time()),
             )
-        """)
-        
-        # Personalities table
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS personalities (
-                id TEXT PRIMARY KEY,
-                name TEXT NOT NULL,
-                prompt TEXT NOT NULL,
-                short_description TEXT,
-                tags TEXT,  -- JSON array
-                is_visible BOOLEAN DEFAULT 1,
-                voice_id TEXT NOT NULL
-            )
-        """)
-        
-        # Conversations table
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS conversations (
-                id TEXT PRIMARY KEY,
-                role TEXT NOT NULL,
-                transcript TEXT NOT NULL,
-                timestamp REAL NOT NULL,
-                session_id TEXT
-            )
-        """)
 
-        # Users table
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS users (
-                id TEXT PRIMARY KEY,
-                name TEXT NOT NULL,
-                age INTEGER,
-                dob TEXT,
-                hobbies TEXT,  -- JSON array
-                personality_type TEXT,
-                likes TEXT,  -- JSON array
-                current_personality_id TEXT,
-                user_type TEXT DEFAULT 'family',
-                device_volume INTEGER DEFAULT 70,
-                FOREIGN KEY (current_personality_id) REFERENCES personalities (id)
-            )
-        """)
-        
         conn.commit()
         conn.close()
 
@@ -225,6 +204,8 @@ class DBService:
         conn.close()
 
     def start_session(self, session_id: str, client_type: str, user_id: Optional[str] = None, personality_id: Optional[str] = None) -> None:
+        if user_id is None:
+            user_id = self.get_active_user_id()
         conn = self._get_conn()
         cursor = conn.cursor()
         started_at = time.time()
@@ -241,6 +222,12 @@ class DBService:
             cursor.execute(
                 "INSERT OR IGNORE INTO sessions (id, started_at, ended_at, duration_sec, client_type, user_id, personality_id) VALUES (?, ?, NULL, NULL, ?, ?, ?)",
                 (session_id, started_at, client_type, user_id, personality_id)
+            )
+
+        if user_id is not None or personality_id is not None:
+            cursor.execute(
+                "UPDATE sessions SET user_id = COALESCE(user_id, ?), personality_id = COALESCE(personality_id, ?) WHERE id = ?",
+                (user_id, personality_id, session_id)
             )
         conn.commit()
         conn.close()
@@ -260,16 +247,22 @@ class DBService:
         conn.commit()
         conn.close()
 
-    def get_sessions(self, limit: int = 50, offset: int = 0) -> List[Session]:
+    def get_sessions(self, limit: int = 50, offset: int = 0, user_id: Optional[str] = None) -> List[Session]:
         conn = self._get_conn()
         cursor = conn.cursor()
         cursor.execute("PRAGMA table_info(sessions)")
         session_columns = [row["name"] for row in cursor.fetchall()]
 
-        cursor.execute(
-            "SELECT * FROM sessions ORDER BY started_at DESC LIMIT ? OFFSET ?",
-            (limit, offset)
-        )
+        if user_id and "user_id" in session_columns:
+            cursor.execute(
+                "SELECT * FROM sessions WHERE user_id = ? ORDER BY started_at DESC LIMIT ? OFFSET ?",
+                (user_id, limit, offset)
+            )
+        else:
+            cursor.execute(
+                "SELECT * FROM sessions ORDER BY started_at DESC LIMIT ? OFFSET ?",
+                (limit, offset)
+            )
         rows = cursor.fetchall()
         conn.close()
 
@@ -332,9 +325,37 @@ class DBService:
                     "INSERT INTO personalities (id, name, prompt, short_description, tags, is_visible, voice_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
                     (p_id, p["name"], p["prompt"], p["short_description"], json.dumps(p["tags"]), True, p["voice_id"])
                 )
-        
+
+        cursor.execute("SELECT COUNT(1) AS n FROM users")
+        row = cursor.fetchone()
+        has_users = bool(row and row["n"])
+        if not has_users:
+            cursor.execute("SELECT id FROM personalities WHERE voice_id = ?", ("dave",))
+            p_row = cursor.fetchone()
+            default_personality_id = p_row["id"] if p_row else None
+            default_user_id = str(uuid.uuid4())
+
+            hobbies_csv = os.environ.get("ELATO_DEFAULT_USER_HOBBIES", "reading,lego,science")
+            default_hobbies = [h.strip() for h in hobbies_csv.split(",") if h.strip()]
+
+            default_user_name = "Elato"
+            cursor.execute(
+                """INSERT INTO users (id, name, age, dob, hobbies, personality_type, likes, current_personality_id, user_type, device_volume)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (default_user_id, default_user_name, 11, None, json.dumps(default_hobbies), None, json.dumps([]), default_personality_id, "family", 70)
+            )
+
         conn.commit()
         conn.close()
+
+        if not self.get_active_user_id():
+            conn = self._get_conn()
+            cursor = conn.cursor()
+            cursor.execute("SELECT id FROM users ORDER BY rowid ASC LIMIT 1")
+            u = cursor.fetchone()
+            conn.close()
+            if u and u["id"]:
+                self.set_active_user_id(u["id"])
 
     # --- Personalities CRUD ---
 
@@ -471,6 +492,7 @@ class DBService:
         
         conn = self._get_conn()
         cursor = conn.cursor()
+
         cursor.execute(
             "INSERT INTO conversations (id, role, transcript, timestamp, session_id) VALUES (?, ?, ?, ?, ?)",
             (c_id, role, transcript, timestamp, session_id)
@@ -483,6 +505,7 @@ class DBService:
     def get_conversations(self, limit: int = 50, offset: int = 0, session_id: Optional[str] = None) -> List[Conversation]:
         conn = self._get_conn()
         cursor = conn.cursor()
+
         if session_id:
             cursor.execute(
                 "SELECT * FROM conversations WHERE session_id = ? ORDER BY timestamp ASC",

@@ -22,3 +22,6 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Local SQLite DB (dev/runtime artifacts)
+elato.db*

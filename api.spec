@@ -9,6 +9,7 @@ datas = [
     ('neuttsair', 'neuttsair'),
     ('index.html', '.'),
     ('chat.html', '.'),
+    ('migrations', 'migrations'),
     ('/Users/akashdeepdeb/.pyenv/versions/3.11.11/lib/python3.11/site-packages/opuslib', 'opuslib'),
 ]
 binaries = []

@@ -2,9 +2,13 @@ import { useEffect, useState } from 'react';
 import { api } from '../api';
 import { Bot, User, ArrowLeft } from 'lucide-react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
+import { useActiveUser } from '../state/ActiveUserContext';
+
+const API_BASE = (import.meta as any).env?.VITE_API_BASE || 'http://127.0.0.1:8000';
 
 export const Conversations = () => {
   const navigate = useNavigate();
+  const { activeUser } = useActiveUser();
   const [searchParams, setSearchParams] = useSearchParams();
   const [sessions, setSessions] = useState<any[]>([]);
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
@@ -17,12 +21,12 @@ export const Conversations = () => {
     try {
       setError(null);
       setLoading(true);
-      const data = await api.getSessions(100, 0);
+      const data = await api.getSessions(100, 0, activeUser?.id || null);
       setSessions(data);
     } catch (e: any) {
       if (e?.status === 404) {
         setSessions([]);
-        setError(null);
+        setError(`API does not provide /sessions at ${API_BASE} (likely running an old sidecar binary, or you are pointing at the wrong server). Rebuild/copy the latest sidecar and try again.`);
       } else {
         setError(e?.message || 'Failed to load conversations');
       }
@@ -37,13 +41,13 @@ export const Conversations = () => {
     const run = async () => {
       try {
         setError(null);
-        const data = await api.getSessions(100, 0);
+        const data = await api.getSessions(100, 0, activeUser?.id || null);
         if (!cancelled) setSessions(data);
       } catch (e: any) {
         if (!cancelled) {
           if (e?.status === 404) {
             setSessions([]);
-            setError(null);
+            setError(`API does not provide /sessions at ${API_BASE} (likely running an old sidecar binary, or you are pointing at the wrong server). Rebuild/copy the latest sidecar and try again.`);
           } else {
             setError(e?.message || 'Failed to load conversations');
           }
@@ -57,7 +61,7 @@ export const Conversations = () => {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [activeUser?.id]);
 
   useEffect(() => {
     const id = searchParams.get('session');

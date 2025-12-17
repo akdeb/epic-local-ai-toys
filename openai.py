@@ -1,5 +1,18 @@
 import os
 import sys
+import signal
+
+# Handle --print-build-info BEFORE heavy imports to avoid DB init
+if "--print-build-info" in sys.argv:
+    # Import only what we need for build info
+    from llm_service import LLMService
+    _llm = LLMService()
+    print(
+        "ELATO_BUILD_INFO "
+        f"llm_repo={_llm.model_repo} "
+        f"llm_file={_llm.model_file}"
+    )
+    sys.exit(0)
 
 # Set espeak library path for macOS homebrew if not set
 if sys.platform == "darwin":
@@ -76,6 +89,56 @@ async def startup_event():
     print("NeuTTS Air started. Models will be loaded on first use.")
     pass
 
+@app.on_event("shutdown")
+async def shutdown_event():
+    print("Shutting down: unloading models...")
+    try:
+        stt_service.unload()
+    except Exception as e:
+        print(f"Warning: failed to unload STT: {e}")
+    try:
+        tts_service.unload()
+    except Exception as e:
+        print(f"Warning: failed to unload TTS: {e}")
+    try:
+        llm_service.unload()
+    except Exception as e:
+        print(f"Warning: failed to unload LLM: {e}")
+
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
+    except Exception:
+        pass
+
+    try:
+        import gc
+
+        gc.collect()
+    except Exception:
+        pass
+
+    print("Shutdown: cleanup complete")
+
+
+@app.post("/shutdown")
+async def shutdown():
+    def _terminate_self() -> None:
+        try:
+            os.kill(os.getpid(), signal.SIGTERM)
+        except Exception:
+            os._exit(0)
+
+    try:
+        loop = asyncio.get_running_loop()
+        loop.call_later(0.1, _terminate_self)
+    except Exception:
+        _terminate_self()
+    return {"status": "shutting_down"}
+
 @app.get("/")
 async def read_root():
     return FileResponse(get_resource_path("index.html"))
@@ -148,8 +211,8 @@ async def list_conversations(limit: int = 50, offset: int = 0, session_id: Optio
     return db_service.get_conversations(limit, offset, session_id=session_id)
 
 @app.get("/sessions")
-async def list_sessions(limit: int = 50, offset: int = 0):
-    return db_service.get_sessions(limit=limit, offset=offset)
+async def list_sessions(limit: int = 50, offset: int = 0, user_id: Optional[str] = None):
+    return db_service.get_sessions(limit=limit, offset=offset, user_id=user_id)
 
 @app.get("/device-status")
 async def get_device_status():
@@ -520,6 +583,7 @@ async def websocket_chat(websocket: WebSocket):
             # Log user conversation
             personality = db_service.get_personality_by_voice(voice)
             personality_id = personality.id if personality else None
+            db_service.start_session(session_id=session_id, client_type="computer", personality_id=personality_id)
             db_service.log_conversation(role="user", transcript=prompt, session_id=session_id)
             
             ref_codes, ref_text = tts_service.get_cached_reference_data(voice)
@@ -613,6 +677,7 @@ async def websocket_voice(websocket: WebSocket):
     websocket._elato_session_id = session_id
     db_service.start_session(session_id=session_id, client_type="computer")
     greeted = False
+    awaiting_tts_done = False
     
     try:
         while True:
@@ -620,23 +685,54 @@ async def websocket_voice(websocket: WebSocket):
             
             if message.get("type") == "websocket.disconnect":
                 break
-            
-            if "bytes" in message:
-                # Send greeting on first audio received
-                if not greeted:
-                    greeted = True
-                    # Fetch personality for logging
-                    personality = db_service.get_personality_by_voice(voice)
-                    personality_id = personality.id if personality else None
-                    
-                    await websocket.send_json({"type": "pause_mic"})
-                    await generate_greeting(websocket, voice, system_prompt, is_esp32=False, personality_id=personality_id)
-                    await websocket.send_json({"type": "resume_mic"})
-                    stt_service.reset()
-                    continue
-                
+
+            msg_bytes = message.get("bytes")
+            msg_text = message.get("text")
+
+            if awaiting_tts_done:
+                if msg_text is not None:
+                    try:
+                        data = json.loads(msg_text)
+                        if data.get("type") == "tts_done":
+                            awaiting_tts_done = False
+                            await websocket.send_json({"type": "resume_mic"})
+                            stt_service.reset()
+                            continue
+                    except Exception:
+                        pass
+
+                # Ignore any audio bytes that arrive while TTS is playing (client may have buffered frames)
+                continue
+
+            if not greeted:
+                if msg_text is not None:
+                    # Config message
+                    import json
+                    try:
+                        data = json.loads(msg_text)
+                        if "voice" in data:
+                            voice = data["voice"]
+                        if "system_prompt" in data:
+                            system_prompt = data["system_prompt"]
+                    except Exception:
+                        pass
+
+                greeted = True
+                # Fetch personality for logging
+                personality = db_service.get_personality_by_voice(voice)
+                personality_id = personality.id if personality else None
+
+                db_service.start_session(session_id=session_id, client_type="computer", personality_id=personality_id)
+
+                await websocket.send_json({"type": "pause_mic"})
+                await generate_greeting(websocket, voice, system_prompt, is_esp32=False, personality_id=personality_id)
+                await websocket.send_json({"type": "tts_end"})
+                awaiting_tts_done = True
+                continue
+
+            if msg_bytes is not None:
                 # Process audio chunk
-                audio_bytes = message["bytes"]
+                audio_bytes = msg_bytes
                 audio = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
                 
                 result = stt_service.process_audio_chunk(audio, use_vad=True)
@@ -652,6 +748,7 @@ async def websocket_voice(websocket: WebSocket):
                         # Log user conversation
                         personality = db_service.get_personality_by_voice(voice)
                         personality_id = personality.id if personality else None
+                        db_service.start_session(session_id=session_id, client_type="computer", personality_id=personality_id)
                         db_service.log_conversation(role="user", transcript=result.text, session_id=session_id)
 
                         # Pause mic while generating response
@@ -703,14 +800,19 @@ async def websocket_voice(websocket: WebSocket):
                         db_service.log_conversation(role="ai", transcript=full_response, session_id=session_id)
                         
                         await websocket.send_json({"type": "done", "full_response": full_response})
-                        await websocket.send_json({"type": "resume_mic"})
-                        stt_service.reset()
+                        await websocket.send_json({"type": "tts_end"})
+                        awaiting_tts_done = True
                         
-            elif "text" in message:
+            elif msg_text is not None:
                 # Config message
                 import json
                 try:
-                    data = json.loads(message["text"])
+                    data = json.loads(msg_text)
+                    if data.get("type") == "tts_done":
+                        awaiting_tts_done = False
+                        await websocket.send_json({"type": "resume_mic"})
+                        stt_service.reset()
+                        continue
                     if "voice" in data:
                         voice = data["voice"]
                     if "system_prompt" in data:
@@ -720,6 +822,21 @@ async def websocket_voice(websocket: WebSocket):
                     
     except WebSocketDisconnect:
         print("Voice WebSocket disconnected")
+    except Exception as e:
+        print(f"Voice WebSocket error: {e}")
+        import traceback
+        traceback.print_exc()
+        try:
+            await websocket.send_json({"type": "error", "message": str(e)})
+        except Exception:
+            pass
+        try:
+            reason = str(e)
+            if len(reason) > 120:
+                reason = reason[:120]
+            await websocket.close(code=1011, reason=reason)
+        except Exception:
+            pass
     finally:
         stt_service.reset()
         try:
@@ -997,6 +1114,7 @@ async def websocket_esp32(websocket: WebSocket):
                     # Log user conversation
                     personality = db_service.get_personality_by_voice(voice)
                     personality_id = personality.id if personality else None
+                    db_service.start_session(session_id=session_id, client_type="device", user_id=active_user_id, personality_id=personality_id)
                     db_service.log_conversation(role="user", transcript=result.text, session_id=session_id)
                     
                     # Notify audio committed
@@ -1154,4 +1272,28 @@ async def websocket_esp32(websocket: WebSocket):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+
+    port = 8000
+    env_port = os.environ.get("ELATO_PORT")
+    if env_port:
+        try:
+            port = int(env_port)
+        except Exception:
+            port = 8000
+
+    if "--port" in sys.argv:
+        try:
+            i = sys.argv.index("--port")
+            if i + 1 < len(sys.argv):
+                port = int(sys.argv[i + 1])
+        except Exception:
+            pass
+    else:
+        for arg in sys.argv:
+            if arg.startswith("--port="):
+                try:
+                    port = int(arg.split("=", 1)[1])
+                except Exception:
+                    pass
+
+    uvicorn.run(app, host="0.0.0.0", port=port)

@@ -109,8 +109,10 @@ export const api = {
     return request(`/conversations?session_id=${encodeURIComponent(sessionId)}`);
   },
 
-  getSessions: async (limit = 50, offset = 0) => {
-    return request(`/sessions?limit=${limit}&offset=${offset}`);
+  getSessions: async (limit = 50, offset = 0, userId?: string | null) => {
+    const qs = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+    if (userId) qs.set("user_id", userId);
+    return request(`/sessions?${qs.toString()}`);
   },
 
   getDeviceStatus: async () => {

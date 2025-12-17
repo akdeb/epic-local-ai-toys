@@ -10,22 +10,32 @@ type VoiceMsg =
   | { type: "audio"; content: string; sentence?: string }
   | { type: "pause_mic" }
   | { type: "resume_mic" }
+  | { type: "tts_end" }
   | { type: "done"; full_response: string }
   | { type: "error"; message: string };
 
 export const TestPage = () => {
   const { activeUser } = useActiveUser();
 
+  const isTauri = useMemo(() => typeof (window as any).__TAURI__ !== "undefined", []);
+
   const [status, setStatus] = useState<string>("connecting");
   const [error, setError] = useState<string | null>(null);
   const [voice, setVoice] = useState<string>("dave");
   const [systemPrompt, setSystemPrompt] = useState<string>("You are a helpful voice assistant. Be concise.");
   const [characterName, setCharacterName] = useState<string>("—");
+  const [configReady, setConfigReady] = useState<boolean>(false);
 
   const [isRecording, setIsRecording] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
   const isRecordingRef = useRef(false);
   const isPausedRef = useRef(false);
+  const autoStartedMicRef = useRef(false);
+
+  const awaitingTtsDoneRef = useRef(false);
+
+  const maxAudioQueueRef = useRef(40);
+  const trimAudioQueueToRef = useRef(20);
 
   const [micLevel, setMicLevel] = useState<number>(0);
   const lastLevelAtRef = useRef<number>(0);
@@ -52,7 +62,20 @@ export const TestPage = () => {
   const playNextAudio = async () => {
     if (isPlayingRef.current) return;
     const next = audioQueueRef.current.shift();
-    if (!next) return;
+    if (!next) {
+      if (awaitingTtsDoneRef.current) {
+        awaitingTtsDoneRef.current = false;
+        const ws = wsRef.current;
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          try {
+            ws.send(JSON.stringify({ type: "tts_done" }));
+          } catch {
+            // ignore
+          }
+        }
+      }
+      return;
+    }
 
     isPlayingRef.current = true;
     setIsSpeaking(true);
@@ -67,6 +90,9 @@ export const TestPage = () => {
     } catch {
       isPlayingRef.current = false;
       setIsSpeaking(false);
+      audioQueueRef.current = [];
+      setError("Audio playback failed in this WebView. Stopping voice stream to prevent memory growth.");
+      stopRecording();
     }
   };
 
@@ -75,6 +101,7 @@ export const TestPage = () => {
 
     const load = async () => {
       try {
+        if (!cancelled) setConfigReady(false);
         const ps = await api.getPersonalities(true);
         const selectedId = activeUser?.current_personality_id;
         const selected = ps.find((p: any) => p.id === selectedId);
@@ -85,6 +112,8 @@ export const TestPage = () => {
         }
       } catch {
         // ignore
+      } finally {
+        if (!cancelled) setConfigReady(true);
       }
     };
 
@@ -138,9 +167,15 @@ export const TestPage = () => {
       return;
     }
 
-    const mediaStream = await navigator.mediaDevices.getUserMedia({
-      audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
-    });
+    let mediaStream: MediaStream;
+    try {
+      mediaStream = await navigator.mediaDevices.getUserMedia({
+        audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
+      });
+    } catch (e: any) {
+      setError(e?.message || "Failed to access microphone");
+      return;
+    }
     mediaStreamRef.current = mediaStream;
 
     const audioCtx = new AudioContext();
@@ -262,13 +297,16 @@ export const TestPage = () => {
       }
     };
 
-    ws.onclose = () => {
+    ws.onclose = (ev) => {
       if (nonce !== connectNonceRef.current) return;
       if (connectTimeoutRef.current) {
         window.clearTimeout(connectTimeoutRef.current);
         connectTimeoutRef.current = null;
       }
       setStatus("disconnected");
+      if (ev?.code && ev.code !== 1000) {
+        setError(`Voice WebSocket closed (code=${ev.code}${ev.reason ? `, reason=${ev.reason}` : ""}).`);
+      }
       stopRecording();
     };
 
@@ -289,6 +327,15 @@ export const TestPage = () => {
 
         if (msg.type === "audio") {
           if (msg.content) {
+            const maxQ = maxAudioQueueRef.current;
+            const trimTo = trimAudioQueueToRef.current;
+            if (audioQueueRef.current.length >= maxQ) {
+              const overflow = audioQueueRef.current.length - trimTo;
+              if (overflow > 0) {
+                audioQueueRef.current.splice(0, overflow);
+              }
+              setError("Audio backlog detected. Dropping older audio to keep the stream alive.");
+            }
             audioQueueRef.current.push(msg.content);
             playNextAudio();
           }
@@ -296,9 +343,30 @@ export const TestPage = () => {
           isPausedRef.current = true;
           setIsPaused(true);
           setMicLevel(0);
+        } else if (msg.type === "tts_end") {
+          awaitingTtsDoneRef.current = true;
+          isPausedRef.current = true;
+          setIsPaused(true);
+          // If there is no audio queued/playing, ack immediately.
+          if (!isPlayingRef.current && audioQueueRef.current.length === 0) {
+            awaitingTtsDoneRef.current = false;
+            const ws = wsRef.current;
+            if (ws && ws.readyState === WebSocket.OPEN) {
+              try {
+                ws.send(JSON.stringify({ type: "tts_done" }));
+              } catch {
+                // ignore
+              }
+            }
+          }
         } else if (msg.type === "resume_mic") {
           isPausedRef.current = false;
           setIsPaused(false);
+
+          if (isTauri && !autoStartedMicRef.current && !isRecordingRef.current) {
+            autoStartedMicRef.current = true;
+            void startRecording();
+          }
         } else if (msg.type === "error") {
           setError(msg.message || "Unknown error");
         }
@@ -309,6 +377,7 @@ export const TestPage = () => {
   };
 
   useEffect(() => {
+    if (!configReady) return;
     connectWs();
 
     return () => {
@@ -323,9 +392,10 @@ export const TestPage = () => {
       }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [wsUrl]);
+  }, [wsUrl, configReady]);
 
   useEffect(() => {
+    if (!configReady) return;
     const ws = wsRef.current;
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
     try {
@@ -333,10 +403,17 @@ export const TestPage = () => {
     } catch {
       // ignore
     }
-  }, [voice, systemPrompt]);
+  }, [voice, systemPrompt, configReady]);
 
   const statusDotClass =
     status === "connected" ? "bg-[#00c853]" : status === "error" ? "bg-red-500" : "bg-[#ffd400]";
+
+  const micStatusLabel = useMemo(() => {
+    if (!isRecording) return null;
+    if (isPaused) return "paused";
+    if (isSpeaking) return "paused";
+    return "listening";
+  }, [isRecording, isPaused, isSpeaking]);
 
   const orbScale = useMemo(() => {
     const base = isRecording ? 1.03 : 1;
@@ -358,7 +435,7 @@ export const TestPage = () => {
             <span className="capitalize">{status}</span>
             {isRecording && (
               <span className="text-gray-500">
-                • {isPaused ? "paused" : "listening"}
+                • {micStatusLabel}
               </span>
             )}
           </div>

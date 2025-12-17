@@ -14,14 +14,14 @@ except ImportError:
 try:
     from neucodec import NeuCodecOnnxDecoder
     NEUCODEC_ONNX_AVAILABLE = True
-except ImportError:
+except Exception:
     NEUCODEC_ONNX_AVAILABLE = False
 
 # Transformers optional
 try:
     from transformers import AutoTokenizer, AutoModelForCausalLM
     TRANSFORMERS_AVAILABLE = True
-except ImportError:
+except Exception:
     TRANSFORMERS_AVAILABLE = False
 
 from phonemizer.backend import EspeakBackend

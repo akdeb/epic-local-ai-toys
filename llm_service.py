@@ -5,8 +5,10 @@ from llama_cpp import Llama
 class LLMService:
     def __init__(self):
         self.llm: Optional[Llama] = None
-        self.model_repo = "hugging-quants/Llama-3.2-3B-Instruct-Q4_K_M-GGUF"
-        self.model_file = "llama-3.2-3b-instruct-q4_k_m.gguf"
+        # self.model_repo = "hugging-quants/Llama-3.2-3B-Instruct-Q4_K_M-GGUF"
+        # self.model_file = "llama-3.2-3b-instruct-q4_k_m.gguf"
+        self.model_repo = "mistralai/Ministral-3-3B-Instruct-2512-GGUF"
+        self.model_file = "Ministral-3-3B-Instruct-2512-Q4_K_M.gguf"
     
     def initialize_llm(self, model_repo: str = None, model_file: str = None) -> None:
         if self.llm is not None:
@@ -21,8 +23,8 @@ class LLMService:
             filename=filename,
             verbose=False,
             n_gpu_layers=-1,
-            n_ctx=2048,
-            chat_format="llama-3",
+            # n_ctx=2048,
+            # chat_format="llama-3",
         )
         print("LLM initialized successfully!")
     

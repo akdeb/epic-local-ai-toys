@@ -29,3 +29,6 @@ __pycache__/
 api-aarch64*
 api-x86*
 api-universal*
+
+# Local SQLite DB (dev/runtime artifacts)
+elato.db*
