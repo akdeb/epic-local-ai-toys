@@ -283,6 +283,10 @@
                 <option value="mara">Mara (Dude)</option>
                 <option value="santa">Santa (Jolly)</option>
             </select>
+            <label style="display:flex; align-items:center; gap:8px; color: rgba(255, 255, 255, 0.7); font-size: 14px;">
+                <input id="assistantFirstToggle" type="checkbox" checked />
+                Assistant speaks first
+            </label>
             <div class="status-indicator">
                 <div class="status-dot" id="statusDot"></div>
                 <span id="statusText">Disconnected</span>
@@ -329,6 +333,8 @@
                 this.currentMessageEl = null;
                 this.isRecording = false;
                 this.isPaused = false;
+                this.awaitingTtsDone = false;
+                this.awaitingTtsId = null;
                 this.mediaStream = null;
                 this.audioContext = null;
                 this.processor = null;
@@ -338,6 +344,7 @@
                 this.sendBtn = document.getElementById('sendBtn');
                 this.micBtn = document.getElementById('micBtn');
                 this.voiceSelect = document.getElementById('voiceSelect');
+                this.assistantFirstToggle = document.getElementById('assistantFirstToggle');
                 this.statusDot = document.getElementById('statusDot');
                 this.statusText = document.getElementById('statusText');
                 this.audioQueueEl = document.getElementById('audioQueue');
@@ -348,34 +355,60 @@
 
             connect() {
                 const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-                this.ws = new WebSocket(`${protocol}//${window.location.host}/ws/chat`);
-                
-                this.ws.onopen = () => {
+                const wsUrl = `${protocol}//${window.location.host}/ws/voice`;
+                if (this.voiceWs && (this.voiceWs.readyState === WebSocket.OPEN || this.voiceWs.readyState === WebSocket.CONNECTING)) {
+                    return;
+                }
+                this.voiceWs = new WebSocket(wsUrl);
+
+                this.voiceWs.onopen = () => {
                     this.statusDot.classList.add('connected');
                     this.statusText.textContent = 'Connected';
                     this.sendBtn.disabled = false;
+                    try {
+                        this.voiceWs.send(JSON.stringify({
+                            voice: this.voiceSelect.value,
+                            assistant_speaks_first: !!this.assistantFirstToggle.checked,
+                        }));
+                    } catch (e) {
+                        console.warn('Failed to send initial config:', e);
+                    }
                 };
                 
-                this.ws.onclose = () => {
+                this.voiceWs.onclose = () => {
                     this.statusDot.classList.remove('connected');
                     this.statusText.textContent = 'Disconnected';
                     this.sendBtn.disabled = true;
+                    if (this.isRecording) {
+                        this.stopRecording();
+                    }
                     setTimeout(() => this.connect(), 3000);
                 };
                 
-                this.ws.onerror = (error) => {
+                this.voiceWs.onerror = (error) => {
                     console.error('WebSocket error:', error);
                 };
                 
-                this.ws.onmessage = (event) => {
+                this.voiceWs.onmessage = (event) => {
                     const data = JSON.parse(event.data);
-                    this.handleMessage(data);
+                    this.handleVoiceMessage(data);
                 };
             }
 
             setupEventListeners() {
                 this.sendBtn.addEventListener('click', () => this.sendMessage());
                 this.micBtn.addEventListener('click', () => this.toggleRecording());
+                this.assistantFirstToggle.addEventListener('change', () => {
+                    if (this.voiceWs && this.voiceWs.readyState === WebSocket.OPEN) {
+                        try {
+                            this.voiceWs.send(JSON.stringify({
+                                assistant_speaks_first: !!this.assistantFirstToggle.checked,
+                            }));
+                        } catch (e) {
+                            console.warn('Failed to send toggle update:', e);
+                        }
+                    }
+                });
                 
                 this.userInput.addEventListener('keydown', (e) => {
                     if (e.key === 'Enter' && !e.shiftKey) {
@@ -441,16 +474,33 @@
                     return;
                 }
                 
-                // Connect to voice WebSocket
-                const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-                const wsUrl = `${protocol}//${window.location.host}/ws/voice`;
-                console.log('[MIC] Connecting to:', wsUrl);
-                
-                this.voiceWs = new WebSocket(wsUrl);
-                
-                this.voiceWs.onopen = () => {
+                if (!this.voiceWs || this.voiceWs.readyState !== WebSocket.OPEN) {
+                    this.connect();
+                }
+
+                const waitForOpen = () => new Promise((resolve) => {
+                    if (this.voiceWs && this.voiceWs.readyState === WebSocket.OPEN) return resolve();
+                    const t = setInterval(() => {
+                        if (this.voiceWs && this.voiceWs.readyState === WebSocket.OPEN) {
+                            clearInterval(t);
+                            resolve();
+                        }
+                    }, 50);
+                });
+
+                await waitForOpen();
+
+                try {
+                    this.voiceWs.send(JSON.stringify({
+                        voice: this.voiceSelect.value,
+                        assistant_speaks_first: !!this.assistantFirstToggle.checked,
+                    }));
+                } catch (e) {
+                    console.warn('Failed to send config:', e);
+                }
+
+                {
                     console.log('[MIC] WebSocket connected');
-                    this.voiceWs.send(JSON.stringify({ voice: this.voiceSelect.value }));
                     
                     this.audioContext = new AudioContext();
                     const actualRate = this.audioContext.sampleRate;
@@ -492,21 +542,9 @@
                     this.micBtn.classList.add('recording');
                     this.micBtn.textContent = '🔴';
                     console.log('[MIC] Recording started!');
-                };
+                }
                 
-                this.voiceWs.onerror = (err) => {
-                    console.error('[MIC] WebSocket error:', err);
-                };
-                
-                this.voiceWs.onclose = () => {
-                    console.log('[MIC] WebSocket closed');
-                    this.stopRecording();
-                };
-                
-                this.voiceWs.onmessage = (e) => {
-                    console.log('[MIC] Message received:', e.data);
-                    this.handleVoiceMessage(JSON.parse(e.data));
-                };
+                // WebSocket handlers are set in connect(); recording only affects audio capture.
             }
 
             stopRecording() {
@@ -518,8 +556,7 @@
                 if (this.processor) { this.processor.disconnect(); this.processor = null; }
                 if (this.audioContext) { this.audioContext.close(); this.audioContext = null; }
                 if (this.mediaStream) { this.mediaStream.getTracks().forEach(t => t.stop()); this.mediaStream = null; }
-                if (this.voiceWs?.readyState === WebSocket.OPEN) { this.voiceWs.close(); }
-                this.voiceWs = null;
+                // Keep the websocket open for typed chat + future recordings.
             }
 
             handleVoiceMessage(data) {
@@ -546,11 +583,22 @@
                         this.micBtn.textContent = '⏸️';
                         console.log('[MIC] Paused for TTS');
                         break;
+                    case 'tts_end':
+                        this.awaitingTtsDone = true;
+                        this.awaitingTtsId = data.id ?? null;
+                        if (!this.isPlaying && this.audioQueue.length === 0) {
+                            this.sendTtsDone();
+                        }
+                        break;
                     case 'resume_mic':
                         // Resume listening after TTS is done
                         this.isPaused = false;
+                        this.awaitingTtsDone = false;
+                        this.awaitingTtsId = null;
                         if (this.isRecording) {
                             this.micBtn.textContent = '🔴';
+                        } else {
+                            this.micBtn.textContent = '🎤';
                         }
                         console.log('[MIC] Resumed');
                         break;
@@ -560,6 +608,7 @@
                             if (cursor) cursor.remove();
                         }
                         this.currentMessageEl = null;
+                        this.sendBtn.disabled = false;
                         break;
                     case 'error':
                         console.error('Voice error:', data.message);
@@ -567,16 +616,32 @@
                 }
             }
 
+            sendTtsDone() {
+                if (!this.awaitingTtsDone) return;
+                this.awaitingTtsDone = false;
+                try {
+                    if (this.voiceWs && this.voiceWs.readyState === WebSocket.OPEN) {
+                        this.voiceWs.send(JSON.stringify({ type: 'tts_done', id: this.awaitingTtsId }));
+                        this.awaitingTtsId = null;
+                        console.log('[MIC] Sent tts_done');
+                    }
+                } catch (e) {
+                    console.warn('[MIC] Failed to send tts_done:', e);
+                }
+            }
+
             sendMessage() {
                 const message = this.userInput.value.trim();
-                if (!message || this.ws.readyState !== WebSocket.OPEN) return;
+                if (!message || !this.voiceWs || this.voiceWs.readyState !== WebSocket.OPEN) return;
                 
                 this.addMessage(message, 'user');
-                
-                this.ws.send(JSON.stringify({
-                    prompt: message,
-                    voice: this.voiceSelect.value
-                }));
+
+                try {
+                    this.voiceWs.send(JSON.stringify({ voice: this.voiceSelect.value }));
+                    this.voiceWs.send(JSON.stringify({ type: 'text_prompt', prompt: message }));
+                } catch (e) {
+                    console.warn('Failed to send message:', e);
+                }
                 
                 this.userInput.value = '';
                 this.userInput.style.height = 'auto';
@@ -668,6 +733,7 @@
                         this.isPlaying = false;
                         if (this.audioQueue.length === 0) {
                             this.audioQueueEl.classList.remove('active');
+                            this.sendTtsDone();
                         }
                         this.playNextAudio();
                     };

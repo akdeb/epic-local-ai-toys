@@ -70,6 +70,109 @@ from path_utils import get_resource_path
 
 app = FastAPI(title="NeuTTS Air Streaming API")
 
+
+def _sanitize_tts_text(text: str) -> str:
+    t = text
+    t = t.replace("\r", " ")
+    t = t.replace("\n", " ")
+    t = t.replace("**", "")
+    t = t.replace("__", "")
+    t = t.replace("`", "")
+    t = re.sub(r"\s+", " ", t).strip()
+
+    # Remove common markdown list prefixes that can sound awkward.
+    t = re.sub(r"(^|\s)[-•]\s+", " ", t)
+
+    # Remove emoji / symbols that can cause misreads in some TTS pipelines.
+    t = re.sub(r"[\U00010000-\U0010ffff]", "", t)
+    return t.strip()
+
+
+VOICE_SAFE_SYSTEM_PROMPT_SUFFIX = (
+    "Output plain spoken text only. "
+    "Do not use emojis. "
+    "Do not use asterisks (*) or any other markdown formatting. "
+    "Do not use bullet lists. "
+    "Do not include stage directions like [laughs] or (sighs). "
+    "Avoid reading punctuation aloud (e.g., do not say 'asterisk', 'emoji', 'hashtag')."
+)
+
+
+def build_voice_safe_system_prompt(system_prompt: str | None) -> str:
+    sp = (system_prompt or "").strip()
+    if sp:
+        return f"{sp}\n\n{VOICE_SAFE_SYSTEM_PROMPT_SUFFIX}"
+    return VOICE_SAFE_SYSTEM_PROMPT_SUFFIX
+
+
+def _split_tts_chunks(text: str, max_chars: int = 180, min_chars: int = 25) -> list[str]:
+    t = _sanitize_tts_text(text)
+    if not t:
+        return []
+
+    parts = re.split(r"(?<=[,;:\u2014\u2013.!?])\s+", t)
+    merged: list[str] = []
+    buf = ""
+    for p in parts:
+        if not p:
+            continue
+        if not buf:
+            buf = p
+            continue
+        if len(buf) + 1 + len(p) <= max_chars:
+            buf = f"{buf} {p}"
+        else:
+            merged.append(buf.strip())
+            buf = p
+    if buf:
+        merged.append(buf.strip())
+
+    # Merge tiny trailing chunks to avoid micro-pauses.
+    out: list[str] = []
+    for p in merged:
+        if out and len(p) < min_chars and (len(out[-1]) + 1 + len(p) <= max_chars):
+            out[-1] = f"{out[-1]} {p}".strip()
+        else:
+            out.append(p)
+
+    return [x for x in out if x]
+
+
+def _split_tts_fallback(text: str, max_chars: int = 80) -> list[str]:
+    t = _sanitize_tts_text(text)
+    if not t:
+        return []
+    words = t.split(" ")
+    out: list[str] = []
+    buf = ""
+    for w in words:
+        if not w:
+            continue
+        if not buf:
+            buf = w
+            continue
+        if len(buf) + 1 + len(w) <= max_chars:
+            buf = f"{buf} {w}"
+        else:
+            out.append(buf)
+            buf = w
+    if buf:
+        out.append(buf)
+    return out
+
+
+def _iter_tts_audio_pairs(text: str, ref_codes, ref_text):
+    for chunk in _split_tts_chunks(text):
+        audio_chunks, _ = tts_service.generate_audio_with_timing(chunk, ref_codes, ref_text)
+        if audio_chunks:
+            yield chunk, audio_chunks
+            continue
+
+        for sub in _split_tts_fallback(chunk):
+            audio_chunks, _ = tts_service.generate_audio_with_timing(sub, ref_codes, ref_text)
+            if audio_chunks:
+                yield sub, audio_chunks
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -549,112 +652,6 @@ class OpusStreamer:
             except:
                 pass
 
-
-
-@app.websocket("/ws/chat")
-async def websocket_chat(websocket: WebSocket):
-    await websocket.accept()
-    print("[Chat] WebSocket connected")
-
-    session_id = str(uuid.uuid4())
-    websocket._elato_session_id = session_id
-    db_service.start_session(session_id=session_id, client_type="computer")
-    
-    try:
-        while True:
-            data = await websocket.receive_json()
-            prompt = data.get("prompt", "")
-            print(f"[Chat] Received prompt: {prompt}")
-            
-            # Lazy init services on first request
-            if not llm_service.is_initialized():
-                await websocket.send_json({"type": "token", "content": " [Initializing models...]\n\n"})
-                llm_service.initialize_llm()
-            if not tts_service.is_initialized():
-                tts_service.initialize_tts()
-
-            voice = data.get("voice", "dave")
-            system_prompt = data.get("system_prompt", "You are a helpful assistant. Keep responses concise and conversational.")
-            
-            if not prompt:
-                await websocket.send_json({"type": "error", "message": "No prompt provided"})
-                continue
-            
-            # Log user conversation
-            personality = db_service.get_personality_by_voice(voice)
-            personality_id = personality.id if personality else None
-            db_service.start_session(session_id=session_id, client_type="computer", personality_id=personality_id)
-            db_service.log_conversation(role="user", transcript=prompt, session_id=session_id)
-            
-            ref_codes, ref_text = tts_service.get_cached_reference_data(voice)
-            if ref_codes is None:
-                await websocket.send_json({"type": "error", "message": f"Voice {voice} not found"})
-                continue
-            
-            sentence_buffer = SentenceBuffer()
-            full_response = ""
-            
-            try:
-                print("[Chat] Starting LLM generation...")
-                for token in llm_service.generate_stream(prompt, system_prompt):
-                    full_response += token
-                    await websocket.send_json({"type": "token", "content": token})
-                    
-                    sentences = sentence_buffer.add(token)
-                    for sentence in sentences:
-                        print(f"[Chat] Processing sentence: '{sentence}'")
-                        audio_chunks, _ = tts_service.generate_audio_with_timing(sentence, ref_codes, ref_text)
-                        if audio_chunks:
-                            print(f"[Chat] Generated {len(audio_chunks)} audio chunks for sentence")
-                            wav_data = tts_service.create_wav_data(audio_chunks)
-                            audio_b64 = base64.b64encode(wav_data).decode('utf-8')
-                            await websocket.send_json({
-                                "type": "audio",
-                                "content": audio_b64,
-                                "sentence": sentence
-                            })
-                            print(f"[Chat] Sent audio packet ({len(wav_data)} bytes)")
-                        else:
-                            print("[Chat] No audio chunks generated for sentence")
-                
-                remaining = sentence_buffer.flush()
-                if remaining:
-                    print(f"[Chat] Processing remaining text: '{remaining}'")
-                    audio_chunks, _ = tts_service.generate_audio_with_timing(remaining, ref_codes, ref_text)
-                    if audio_chunks:
-                        print(f"[Chat] Generated {len(audio_chunks)} audio chunks for remaining text")
-                        wav_data = tts_service.create_wav_data(audio_chunks)
-                        audio_b64 = base64.b64encode(wav_data).decode('utf-8')
-                        await websocket.send_json({
-                            "type": "audio",
-                            "content": audio_b64,
-                            "sentence": remaining
-                        })
-                        print(f"[Chat] Sent final audio packet ({len(wav_data)} bytes)")
-                
-                print("[Chat] Generation complete")
-                # Log AI response
-                db_service.log_conversation(role="ai", transcript=full_response, session_id=session_id)
-                await websocket.send_json({"type": "done", "full_response": full_response})
-                
-            except Exception as e:
-                print(f"Error in chat generation: {e}")
-                import traceback
-                traceback.print_exc()
-                await websocket.send_json({"type": "error", "message": str(e)})
-    
-    except WebSocketDisconnect:
-        print("[Chat] WebSocket disconnected")
-    finally:
-        try:
-            db_service.end_session(session_id)
-        except Exception:
-            pass
-        print("[Chat] Cleaning up chat resources... (Keeping models loaded)")
-        # llm_service.unload()
-        # tts_service.unload()
-
-
 @app.websocket("/ws/voice")
 async def websocket_voice(websocket: WebSocket):
     """Voice chat: audio in -> STT -> LLM -> TTS -> audio out"""
@@ -677,7 +674,10 @@ async def websocket_voice(websocket: WebSocket):
     websocket._elato_session_id = session_id
     db_service.start_session(session_id=session_id, client_type="computer")
     greeted = False
+    assistant_speaks_first = True
     awaiting_tts_done = False
+    awaiting_tts_id: int | None = None
+    next_tts_id = 0
     
     try:
         while True:
@@ -694,10 +694,12 @@ async def websocket_voice(websocket: WebSocket):
                     try:
                         data = json.loads(msg_text)
                         if data.get("type") == "tts_done":
-                            awaiting_tts_done = False
-                            await websocket.send_json({"type": "resume_mic"})
-                            stt_service.reset()
-                            continue
+                            if awaiting_tts_id is None or data.get("id") == awaiting_tts_id:
+                                awaiting_tts_done = False
+                                awaiting_tts_id = None
+                                await websocket.send_json({"type": "resume_mic"})
+                                stt_service.reset()
+                                continue
                     except Exception:
                         pass
 
@@ -714,6 +716,8 @@ async def websocket_voice(websocket: WebSocket):
                             voice = data["voice"]
                         if "system_prompt" in data:
                             system_prompt = data["system_prompt"]
+                        if "assistant_speaks_first" in data:
+                            assistant_speaks_first = bool(data["assistant_speaks_first"])
                     except Exception:
                         pass
 
@@ -724,10 +728,18 @@ async def websocket_voice(websocket: WebSocket):
 
                 db_service.start_session(session_id=session_id, client_type="computer", personality_id=personality_id)
 
-                await websocket.send_json({"type": "pause_mic"})
-                await generate_greeting(websocket, voice, system_prompt, is_esp32=False, personality_id=personality_id)
-                await websocket.send_json({"type": "tts_end"})
-                awaiting_tts_done = True
+                if assistant_speaks_first:
+                    await websocket.send_json({"type": "pause_mic"})
+                    await generate_greeting(websocket, voice, system_prompt, is_esp32=False, personality_id=personality_id)
+                    next_tts_id += 1
+                    awaiting_tts_id = next_tts_id
+                    await websocket.send_json({"type": "tts_end", "id": awaiting_tts_id})
+                    awaiting_tts_done = True
+                else:
+                    try:
+                        await websocket.send_json({"type": "resume_mic"})
+                    except Exception:
+                        break
                 continue
 
             if msg_bytes is not None:
@@ -762,8 +774,9 @@ async def websocket_voice(websocket: WebSocket):
                         
                         sentence_buffer = SentenceBuffer()
                         full_response = ""
-                        
-                        for token in llm_service.generate_stream(result.text, system_prompt):
+
+                        safe_system_prompt = build_voice_safe_system_prompt(system_prompt)
+                        for token in llm_service.generate_stream(result.text, safe_system_prompt):
                             full_response += token
                             await websocket.send_json({"type": "token", "content": token})
                             
@@ -771,13 +784,12 @@ async def websocket_voice(websocket: WebSocket):
                                 if len(sentence.strip()) < 3:  # Skip very short text
                                     continue
                                 try:
-                                    audio_chunks, _ = tts_service.generate_audio_with_timing(sentence, ref_codes, ref_text)
-                                    if audio_chunks:
+                                    for spoken, audio_chunks in _iter_tts_audio_pairs(sentence, ref_codes, ref_text):
                                         wav_data = tts_service.create_wav_data(audio_chunks)
                                         await websocket.send_json({
                                             "type": "audio",
                                             "content": base64.b64encode(wav_data).decode('utf-8'),
-                                            "sentence": sentence
+                                            "sentence": spoken
                                         })
                                 except Exception as e:
                                     print(f"TTS error for '{sentence}': {e}")
@@ -785,13 +797,12 @@ async def websocket_voice(websocket: WebSocket):
                         remaining = sentence_buffer.flush()
                         if remaining and len(remaining.strip()) >= 3:
                             try:
-                                audio_chunks, _ = tts_service.generate_audio_with_timing(remaining, ref_codes, ref_text)
-                                if audio_chunks:
+                                for spoken, audio_chunks in _iter_tts_audio_pairs(remaining, ref_codes, ref_text):
                                     wav_data = tts_service.create_wav_data(audio_chunks)
                                     await websocket.send_json({
                                         "type": "audio",
                                         "content": base64.b64encode(wav_data).decode('utf-8'),
-                                        "sentence": remaining
+                                        "sentence": spoken
                                     })
                             except Exception as e:
                                 print(f"TTS error for '{remaining}': {e}")
@@ -800,7 +811,9 @@ async def websocket_voice(websocket: WebSocket):
                         db_service.log_conversation(role="ai", transcript=full_response, session_id=session_id)
                         
                         await websocket.send_json({"type": "done", "full_response": full_response})
-                        await websocket.send_json({"type": "tts_end"})
+                        next_tts_id += 1
+                        awaiting_tts_id = next_tts_id
+                        await websocket.send_json({"type": "tts_end", "id": awaiting_tts_id})
                         awaiting_tts_done = True
                         
             elif msg_text is not None:
@@ -809,9 +822,66 @@ async def websocket_voice(websocket: WebSocket):
                 try:
                     data = json.loads(msg_text)
                     if data.get("type") == "tts_done":
-                        awaiting_tts_done = False
-                        await websocket.send_json({"type": "resume_mic"})
-                        stt_service.reset()
+                        if awaiting_tts_id is None or data.get("id") == awaiting_tts_id:
+                            awaiting_tts_done = False
+                            awaiting_tts_id = None
+                            await websocket.send_json({"type": "resume_mic"})
+                            stt_service.reset()
+                            continue
+                    if data.get("type") == "text_prompt" and data.get("prompt"):
+                        prompt = str(data.get("prompt"))
+
+                        personality = db_service.get_personality_by_voice(voice)
+                        personality_id = personality.id if personality else None
+                        db_service.start_session(session_id=session_id, client_type="computer", personality_id=personality_id)
+                        db_service.log_conversation(role="user", transcript=prompt, session_id=session_id)
+
+                        await websocket.send_json({"type": "pause_mic"})
+                        ref_codes, ref_text = tts_service.get_cached_reference_data(voice)
+                        if ref_codes is None:
+                            await websocket.send_json({"type": "resume_mic"})
+                            continue
+
+                        sentence_buffer = SentenceBuffer()
+                        full_response = ""
+
+                        safe_system_prompt = build_voice_safe_system_prompt(system_prompt)
+                        for token in llm_service.generate_stream(prompt, safe_system_prompt):
+                            full_response += token
+                            await websocket.send_json({"type": "token", "content": token})
+                            for sentence in sentence_buffer.add(token):
+                                if len(sentence.strip()) < 3:
+                                    continue
+                                try:
+                                    for spoken, audio_chunks in _iter_tts_audio_pairs(sentence, ref_codes, ref_text):
+                                        wav_data = tts_service.create_wav_data(audio_chunks)
+                                        await websocket.send_json({
+                                            "type": "audio",
+                                            "content": base64.b64encode(wav_data).decode('utf-8'),
+                                            "sentence": spoken,
+                                        })
+                                except Exception as e:
+                                    print(f"TTS error for '{sentence}': {e}")
+
+                        remaining = sentence_buffer.flush()
+                        if remaining and len(remaining.strip()) >= 3:
+                            try:
+                                for spoken, audio_chunks in _iter_tts_audio_pairs(remaining, ref_codes, ref_text):
+                                    wav_data = tts_service.create_wav_data(audio_chunks)
+                                    await websocket.send_json({
+                                        "type": "audio",
+                                        "content": base64.b64encode(wav_data).decode('utf-8'),
+                                        "sentence": spoken,
+                                    })
+                            except Exception as e:
+                                print(f"TTS error for '{remaining}': {e}")
+
+                        db_service.log_conversation(role="ai", transcript=full_response, session_id=session_id)
+                        await websocket.send_json({"type": "done", "full_response": full_response})
+                        next_tts_id += 1
+                        awaiting_tts_id = next_tts_id
+                        await websocket.send_json({"type": "tts_end", "id": awaiting_tts_id})
+                        awaiting_tts_done = True
                         continue
                     if "voice" in data:
                         voice = data["voice"]
@@ -883,7 +953,8 @@ async def generate_greeting(websocket: WebSocket, voice: str, system_prompt: str
     first_audio = True
     
     try:
-        for token in llm_service.generate_stream(greeting_prompt, system_prompt):
+        safe_system_prompt = build_voice_safe_system_prompt(system_prompt)
+        for token in llm_service.generate_stream(greeting_prompt, safe_system_prompt):
             full_response += token
             
             if not is_esp32:
@@ -908,8 +979,7 @@ async def generate_greeting(websocket: WebSocket, voice: str, system_prompt: str
                     first_audio = False
                 
                 try:
-                    audio_chunks, _ = tts_service.generate_audio_with_timing(sentence, ref_codes, ref_text)
-                    if audio_chunks:
+                    for spoken, audio_chunks in _iter_tts_audio_pairs(sentence, ref_codes, ref_text):
                         if is_esp32:
                             pcm_data = np.concatenate(audio_chunks)
                             if opus_streamer and opus_streamer.enabled:
@@ -928,7 +998,7 @@ async def generate_greeting(websocket: WebSocket, voice: str, system_prompt: str
                             await websocket.send_json({
                                 "type": "audio",
                                 "content": base64.b64encode(wav_data).decode('utf-8'),
-                                "sentence": sentence
+                                "sentence": spoken
                             })
                 except Exception as e:
                     print(f"Greeting TTS error: {e}")
@@ -947,8 +1017,7 @@ async def generate_greeting(websocket: WebSocket, voice: str, system_prompt: str
                 first_audio = False
 
             try:
-                audio_chunks, _ = tts_service.generate_audio_with_timing(remaining, ref_codes, ref_text)
-                if audio_chunks:
+                for spoken, audio_chunks in _iter_tts_audio_pairs(remaining, ref_codes, ref_text):
                     if is_esp32:
                         pcm_data = np.concatenate(audio_chunks)
                         if opus_streamer and opus_streamer.enabled:
@@ -967,7 +1036,7 @@ async def generate_greeting(websocket: WebSocket, voice: str, system_prompt: str
                         await websocket.send_json({
                             "type": "audio",
                             "content": base64.b64encode(wav_data).decode('utf-8'),
-                            "sentence": remaining
+                            "sentence": spoken
                         })
             except Exception as e:
                 print(f"Greeting TTS error: {e}")
@@ -1137,8 +1206,9 @@ async def websocket_esp32(websocket: WebSocket):
                     sentence_buffer = SentenceBuffer()
                     full_response = ""
                     client_active = True
-                    
-                    for token in llm_service.generate_stream(result.text, system_prompt):
+
+                    safe_system_prompt = build_voice_safe_system_prompt(system_prompt)
+                    for token in llm_service.generate_stream(result.text, safe_system_prompt):
                         if not client_active:
                             break
                             
@@ -1162,8 +1232,7 @@ async def websocket_esp32(websocket: WebSocket):
                                     break
                             
                             try:
-                                audio_chunks, _ = tts_service.generate_audio_with_timing(sentence, ref_codes, ref_text)
-                                if audio_chunks:
+                                for spoken, audio_chunks in _iter_tts_audio_pairs(sentence, ref_codes, ref_text):
                                     pcm_data = np.concatenate(audio_chunks)
                                     if opus_streamer.enabled:
                                         packets = opus_streamer.process(pcm_data)
@@ -1177,7 +1246,7 @@ async def websocket_esp32(websocket: WebSocket):
                                     else:
                                         if not await send_audio_chunked(websocket, pcm_data):
                                             client_active = False
-                                    
+
                                     if not client_active:
                                         break
                             except Exception as e:
@@ -1203,8 +1272,7 @@ async def websocket_esp32(websocket: WebSocket):
                             
                             if client_active:
                                 try:
-                                    audio_chunks, _ = tts_service.generate_audio_with_timing(remaining, ref_codes, ref_text)
-                                    if audio_chunks:
+                                    for spoken, audio_chunks in _iter_tts_audio_pairs(remaining, ref_codes, ref_text):
                                         pcm_data = np.concatenate(audio_chunks)
                                         if opus_streamer.enabled:
                                             packets = opus_streamer.process(pcm_data)
@@ -1218,6 +1286,9 @@ async def websocket_esp32(websocket: WebSocket):
                                         else:
                                             if not await send_audio_chunked(websocket, pcm_data):
                                                 client_active = False
+
+                                        if not client_active:
+                                            break
                                 except Exception as e:
                                     print(f"[ESP32] TTS error: {e}")
                     

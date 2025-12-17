@@ -3,7 +3,7 @@ numpy==2.2.6
 phonemizer==3.3.0
 soundfile==0.13.1
 resemble-perth==1.0.1
-llama-cpp-python
+llama-cpp-python @ git+https://github.com/JamePeng/llama-cpp-python.git
 onnxruntime
 fastapi[standard]
 uvicorn
