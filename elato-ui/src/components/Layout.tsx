@@ -58,7 +58,7 @@ export const Layout = () => {
         {activeUser?.current_personality_id && (
           <div className="fixed bottom-0 left-64 right-0 pointer-events-none">
             <div className="max-w-4xl mx-auto px-8 pb-6 pointer-events-auto">
-              <div className="bg-white border-2 border-black rounded-[24px] px-5 py-4 flex items-center justify-between shadow-[0_10px_24px_rgba(0,0,0,0.14)]">
+              <div className="bg-white border-3 border-[var(--color-retro-yellow)] rounded-full px-5 py-4 flex items-center justify-between shadow-[0_10px_24px_rgba(0,0,0,0.14)]">
                 <div className="min-w-0">
                   <div className="flex items-center flex-row gap-3">
                     <div className="font-mono text-xs text-gray-500">Active</div>

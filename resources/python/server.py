@@ -807,7 +807,7 @@ class PersonalityCreate(BaseModel):
     prompt: str
     short_description: Optional[str] = ""
     tags: list = []
-    voice_id: str = "dave"
+    voice_id: str = "radio"
     is_global: bool = False
 
 @app.post("/personalities")
@@ -850,10 +850,7 @@ async def generate_personality(body: GeneratePersonalityRequest):
     system_prompt = await pipeline.generate_text_simple(sys_prompt, max_tokens=300)
     system_prompt = system_prompt.strip()
     
-    # 4. Generate Tags
-    tags_prompt = f"Based on this description: '{description}', suggest 3-5 comma-separated tags. Output ONLY the tags."
-    tags_str = await pipeline.generate_text_simple(tags_prompt, max_tokens=60)
-    tags = [t.strip() for t in tags_str.split(",") if t.strip()]
+    tags: list = []
     
     # Create the personality
     p = db_service.db_service.create_personality(
@@ -861,7 +858,7 @@ async def generate_personality(body: GeneratePersonalityRequest):
         prompt=system_prompt,
         short_description=short_desc,
         tags=tags,
-        voice_id="dave", # Default
+        voice_id="radio",
         is_global=False
     )
     
@@ -881,6 +878,14 @@ async def update_personality(personality_id: str, body: Dict[str, Any]):
     if not p:
         return {"error": "Personality not found"}, 404
     return {"id": p.id, "name": p.name}
+
+
+@app.delete("/personalities/{personality_id}")
+async def delete_personality(personality_id: str):
+    ok = db_service.db_service.delete_personality(personality_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Personality not found or cannot delete global personality")
+    return {"ok": True}
 
 # --- Conversations ---
 

@@ -92,6 +92,12 @@ export const api = {
     });
   },
 
+  deletePersonality: async (id: string) => {
+    return request(`/personalities/${id}`, {
+      method: "DELETE",
+    });
+  },
+
   // Users
   getUsers: async () => {
     return request(`/users`);

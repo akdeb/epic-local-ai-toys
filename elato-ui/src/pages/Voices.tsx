@@ -13,6 +13,22 @@ export const VoicesPage = () => {
   const [audioSrcByVoiceId, setAudioSrcByVoiceId] = useState<Record<string, string>>({});
   const [searchParams] = useSearchParams();
 
+  const sortedVoices = useMemo(() => {
+    const arr = Array.isArray(voices) ? voices.slice() : [];
+    arr.sort((a, b) => {
+      const aId = String(a?.voice_id || "");
+      const bId = String(b?.voice_id || "");
+      const aDownloaded = downloadedVoiceIds.has(aId);
+      const bDownloaded = downloadedVoiceIds.has(bId);
+      if (aDownloaded !== bDownloaded) return aDownloaded ? -1 : 1;
+
+      const aName = String(a?.voice_name || aId);
+      const bName = String(b?.voice_name || bId);
+      return aName.localeCompare(bName);
+    });
+    return arr;
+  }, [voices, downloadedVoiceIds]);
+
   const selectedVoiceId = useMemo(() => {
     const v = searchParams.get("voice_id");
     return v ? String(v) : null;
@@ -129,7 +145,7 @@ export const VoicesPage = () => {
       )}
 
       <div className="flex flex-col gap-3">
-        {voices.map((v) => (
+        {sortedVoices.map((v) => (
           <div
             key={v.voice_id}
             ref={selectedVoiceId === v.voice_id ? selectedRef : null}
@@ -139,14 +155,14 @@ export const VoicesPage = () => {
               <div className="min-w-0">
                 <h3 className="text-lg font-black inline-flex items-center gap-2">
                   <span>{v.voice_name || v.voice_id}</span>
-                  <span
+                  {/* <span
                     className="inline-flex items-center justify-center align-middle"
                     title={String(v.gender).toLowerCase() === "female" ? "female voice" : "male voice"}
                   >
                     <span className="text-sm leading-none relative top-[1px]">
                       {String(v.gender).toLowerCase() === "female" ? "🙋‍♀️" : "🙋‍♂️"}
                     </span>
-                  </span>
+                  </span> */}
                 </h3>
                 
                 <p className="text-gray-600 text-sm font-medium mt-1">

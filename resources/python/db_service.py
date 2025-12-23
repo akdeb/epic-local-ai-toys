@@ -7,7 +7,6 @@ import glob
 import random
 import sys
 import logging
-import urllib.request
 from pathlib import Path
 from typing import List, Optional, Dict, Any
 from dataclasses import dataclass
@@ -418,41 +417,6 @@ class DBService:
         return items
 
     def _seed_defaults(self):
-        defaults = [
-            {
-                "name": "Dave",
-                "prompt": "You are Dave, a helpful and knowledgeable AI assistant. You speak clearly and concisely.",
-                "short_description": "Standard British male voice, helpful and precise.",
-                "tags": ["assistant", "british", "male", "standard"],
-                "voice_id": "radio",
-                "is_global": True
-            },
-            {
-                "name": "Jo",
-                "prompt": "You are Jo, a friendly and casual AI companion. You like to keep things light and conversational.",
-                "short_description": "Friendly American female voice, casual tone.",
-                "tags": ["companion", "american", "female", "casual"],
-                "voice_id": "british_woman_narrator",
-                "is_global": True
-            },
-            {
-                "name": "Mara",
-                "prompt": "You are Mara, a professional and articulate assistant. You are efficient and get straight to the point.",
-                "short_description": "Professional female voice, articulate and efficient.",
-                "tags": ["professional", "female", "assistant", "articulate"],
-                "voice_id": "narrator1",
-                "is_global": True
-            },
-            {
-                "name": "Santa",
-                "prompt": "Ho ho ho! You are Santa Claus. You are jolly, festive, and full of holiday cheer. You love talking about reindeer, elves, and Christmas spirit.",
-                "short_description": "Jolly Santa Claus voice, festive and cheerful.",
-                "tags": ["festive", "character", "male", "holiday"],
-                "voice_id": "santa",
-                "is_global": True
-            }
-        ]
-
         conn = self._get_conn()
         cursor = conn.cursor()
 
@@ -463,53 +427,106 @@ class DBService:
         except Exception:
             has_voices_table = False
 
-        if has_voices_table:
-            voices_url = os.environ.get(
-                "ELATO_VOICES_JSON_URL",
-                "https://raw.githubusercontent.com/akdeb/epic-local-ai-toys/refs/heads/main/elato-ui/src/assets/voices.json",
-            )
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        assets_candidates = [
+            os.environ.get("ELATO_ASSETS_DIR"),
+            os.path.abspath(os.path.join(base_dir, "../../elato-ui/src/assets")),
+        ]
+        assets_dir = None
+        for candidate in assets_candidates:
+            if candidate and os.path.isdir(candidate):
+                assets_dir = candidate
+                break
+
+        voices_payload = None
+        personalities_payload = None
+        if assets_dir:
             try:
-                with urllib.request.urlopen(voices_url, timeout=10) as resp:
-                    payload = json.loads(resp.read().decode("utf-8"))
-                if isinstance(payload, list):
-                    for item in payload:
-                        if not isinstance(item, dict):
-                            continue
-                        vid = item.get("voice_id") or item.get("id")
-                        vname = item.get("voice_name") or item.get("name")
-                        if not vid or not vname:
-                            continue
-                        cursor.execute(
-                            """
-                            INSERT INTO voices (voice_id, gender, voice_name, voice_description, voice_src, is_global)
-                            VALUES (?, ?, ?, ?, ?, ?)
-                            ON CONFLICT(voice_id) DO UPDATE SET
-                              gender = excluded.gender,
-                              voice_name = excluded.voice_name,
-                              voice_description = excluded.voice_description,
-                              voice_src = excluded.voice_src,
-                              is_global = excluded.is_global
-                            """,
-                            (
-                                str(vid),
-                                item.get("gender"),
-                                str(vname),
-                                item.get("voice_description") or item.get("description"),
-                                item.get("voice_src") or item.get("src"),
-                                True,
-                            ),
-                        )
+                with open(os.path.join(assets_dir, "voices.json"), "r", encoding="utf-8") as f:
+                    voices_payload = json.load(f)
             except Exception:
-                pass
-        
-        for p in defaults:
-            # Check if exists by voice_id to avoid duplicates on restart
-            cursor.execute("SELECT id FROM personalities WHERE voice_id = ?", (p["voice_id"],))
-            if not cursor.fetchone():
-                p_id = str(uuid.uuid4())
+                voices_payload = None
+            try:
+                with open(os.path.join(assets_dir, "personalities.json"), "r", encoding="utf-8") as f:
+                    personalities_payload = json.load(f)
+            except Exception:
+                personalities_payload = None
+
+        if has_voices_table and isinstance(voices_payload, list):
+            for item in voices_payload:
+                if not isinstance(item, dict):
+                    continue
+                vid = item.get("voice_id") or item.get("id")
+                vname = item.get("voice_name") or item.get("name")
+                if not vid or not vname:
+                    continue
                 cursor.execute(
-                    "INSERT INTO personalities (id, name, prompt, short_description, tags, is_visible, voice_id, is_global) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    (p_id, p["name"], p["prompt"], p["short_description"], json.dumps(p["tags"]), True, p["voice_id"], p["is_global"])
+                    """
+                    INSERT INTO voices (voice_id, gender, voice_name, voice_description, voice_src, is_global)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(voice_id) DO UPDATE SET
+                      gender = excluded.gender,
+                      voice_name = excluded.voice_name,
+                      voice_description = excluded.voice_description,
+                      voice_src = excluded.voice_src,
+                      is_global = excluded.is_global
+                    """,
+                    (
+                        str(vid),
+                        item.get("gender"),
+                        str(vname),
+                        item.get("voice_description") or item.get("description"),
+                        item.get("voice_src") or item.get("src"),
+                        True,
+                    ),
+                )
+
+        # Seed personalities from local personalities.json (ignore if table missing)
+        try:
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='personalities'")
+            has_personalities_table = bool(cursor.fetchone())
+        except Exception:
+            has_personalities_table = False
+
+        if has_personalities_table and isinstance(personalities_payload, list):
+            for item in personalities_payload:
+                if not isinstance(item, dict):
+                    continue
+                p_id = item.get("id")
+                name = item.get("name")
+                prompt = item.get("prompt")
+                short_desc = item.get("short_description")
+                voice_id = item.get("voice_id")
+                if not p_id or not name or not prompt or voice_id is None:
+                    continue
+
+                # Enforce many-to-one relationship: personality.voice_id must exist in voices table.
+                if self.get_voice(str(voice_id)) is None:
+                    continue
+
+                cursor.execute(
+                    """
+                    INSERT INTO personalities (id, name, prompt, short_description, tags, is_visible, voice_id, is_global)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(id) DO UPDATE SET
+                      name = excluded.name,
+                      prompt = excluded.prompt,
+                      short_description = excluded.short_description,
+                      tags = excluded.tags,
+                      is_visible = excluded.is_visible,
+                      voice_id = excluded.voice_id,
+                      is_global = excluded.is_global
+                    """,
+                    (
+                        str(p_id),
+                        str(name),
+                        str(prompt),
+                        str(short_desc or ""),
+                        json.dumps([]),
+                        True,
+                        str(voice_id),
+                        True,
+                    ),
                 )
 
         cursor.execute("SELECT COUNT(1) AS n FROM users")
@@ -629,16 +646,28 @@ class DBService:
         conn.close()
         return self.get_voice(voice_id)
 
-    def create_personality(self, name: str, prompt: str, short_description: str, tags: List[str], voice_id: str, is_visible: bool = True, is_global: bool = False) -> Personality:
+    def create_personality(
+        self,
+        name: str,
+        prompt: str,
+        short_description: str,
+        tags: List[str],
+        voice_id: str,
+        is_visible: bool = True,
+        is_global: bool = False,
+    ) -> Personality:
         if self.get_voice(voice_id) is None:
             voice_id = "radio"
+
         p_id = str(uuid.uuid4())
         conn = self._get_conn()
         cursor = conn.cursor()
+
         cursor.execute(
             "INSERT INTO personalities (id, name, prompt, short_description, tags, is_visible, voice_id, is_global) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (p_id, name, prompt, short_description, json.dumps(tags), is_visible, voice_id, is_global)
+            (p_id, name, prompt, short_description, json.dumps(tags), is_visible, voice_id, is_global),
         )
+
         conn.commit()
         conn.close()
         return Personality(p_id, name, prompt, short_description, tags, is_visible, is_global, voice_id)
@@ -646,40 +675,39 @@ class DBService:
     def get_personalities(self, include_hidden: bool = False) -> List[Personality]:
         conn = self._get_conn()
         cursor = conn.cursor()
-        
-        # Ensure is_global column exists (migration 002 should handle this, but for robustness in select)
-        # We assume migration runs.
-        
+
         if include_hidden:
             cursor.execute("SELECT * FROM personalities")
         else:
             cursor.execute("SELECT * FROM personalities WHERE is_visible = 1")
-        
+
         rows = cursor.fetchall()
         conn.close()
-        
+
         results = []
         for row in rows:
-            # Handle cases where is_global might be missing if migration failed (fallback to 0)
             is_global = False
             if "is_global" in row.keys():
                 is_global = bool(row["is_global"])
-            
-            results.append(Personality(
-                id=row["id"],
-                name=row["name"],
-                prompt=row["prompt"],
-                short_description=row["short_description"],
-                tags=json.loads(row["tags"]),
-                is_visible=bool(row["is_visible"]),
-                is_global=is_global,
-                voice_id=row["voice_id"]
-            ))
+
+            results.append(
+                Personality(
+                    id=row["id"],
+                    name=row["name"],
+                    prompt=row["prompt"],
+                    short_description=row["short_description"],
+                    tags=json.loads(row["tags"]) if row["tags"] else [],
+                    is_visible=bool(row["is_visible"]),
+                    is_global=is_global,
+                    voice_id=row["voice_id"],
+                )
+            )
         return results
 
     def get_personality(self, p_id: str) -> Optional[Personality]:
         conn = self._get_conn()
         cursor = conn.cursor()
+
         cursor.execute("SELECT * FROM personalities WHERE id = ?", (p_id,))
         row = cursor.fetchone()
         conn.close()
@@ -697,13 +725,14 @@ class DBService:
                 tags=json.loads(row["tags"]),
                 is_visible=bool(row["is_visible"]),
                 is_global=is_global,
-                voice_id=row["voice_id"]
+                voice_id=row["voice_id"],
             )
         return None
     
     def get_personality_by_voice(self, voice_id: str) -> Optional[Personality]:
         conn = self._get_conn()
         cursor = conn.cursor()
+
         cursor.execute("SELECT * FROM personalities WHERE voice_id = ?", (voice_id,))
         row = cursor.fetchone()
         conn.close()
@@ -721,7 +750,7 @@ class DBService:
                 tags=json.loads(row["tags"]),
                 is_visible=bool(row["is_visible"]),
                 is_global=is_global,
-                voice_id=row["voice_id"]
+                voice_id=row["voice_id"],
             )
         return None
 
@@ -754,7 +783,7 @@ class DBService:
                 kwargs["voice_id"] = "radio"
             fields.append("voice_id = ?")
             values.append(kwargs["voice_id"])
-            
+
         if not fields:
             return current
             
@@ -770,9 +799,39 @@ class DBService:
         return self.get_personality(p_id)
 
     def delete_personality(self, p_id: str) -> bool:
+        # Cascade delete: conversations (by session_id) -> sessions (by personality_id) -> personality.
         conn = self._get_conn()
         cursor = conn.cursor()
-        cursor.execute("DELETE FROM personalities WHERE id = ?", (p_id,))
+
+        # Detach users currently using this personality.
+        try:
+            cursor.execute(
+                "UPDATE users SET current_personality_id = NULL WHERE current_personality_id = ?",
+                (p_id,),
+            )
+        except Exception:
+            pass
+
+        # Find sessions associated with this personality.
+        session_ids: List[str] = []
+        try:
+            cursor.execute("SELECT id FROM sessions WHERE personality_id = ?", (p_id,))
+            session_ids = [row["id"] for row in cursor.fetchall()]
+        except Exception:
+            session_ids = []
+
+        if session_ids:
+            placeholders = ",".join(["?"] * len(session_ids))
+            try:
+                cursor.execute(f"DELETE FROM conversations WHERE session_id IN ({placeholders})", tuple(session_ids))
+            except Exception:
+                pass
+            try:
+                cursor.execute(f"DELETE FROM sessions WHERE id IN ({placeholders})", tuple(session_ids))
+            except Exception:
+                pass
+
+        cursor.execute("DELETE FROM personalities WHERE id = ? AND is_global = 0", (p_id,))
         success = cursor.rowcount > 0
         conn.commit()
         conn.close()

@@ -1,16 +1,19 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, type MouseEvent } from 'react';
 import { api } from '../api';
-import { Download, Eye, EyeOff, Pencil } from 'lucide-react';
+import { Download, Loader2, Pencil, Play, Trash2 } from 'lucide-react';
 import { useActiveUser } from '../state/ActiveUserContext';
 import { PersonalityModal, PersonalityForModal } from '../components/PersonalityModal';
 import { Link } from 'react-router-dom';
+import { invoke } from '@tauri-apps/api/core';
 
 export const Personalities = () => {
   const [personalities, setPersonalities] = useState<any[]>([]);
   const [voices, setVoices] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [showHidden, setShowHidden] = useState(false);
+  const [downloadedVoiceIds, setDownloadedVoiceIds] = useState<Set<string>>(new Set());
+  const [downloadingVoiceId, setDownloadingVoiceId] = useState<string | null>(null);
+  const [audioSrcByVoiceId, setAudioSrcByVoiceId] = useState<Record<string, string>>({});
   
   // Modal state
   const [modalOpen, setModalOpen] = useState(false);
@@ -22,7 +25,7 @@ export const Personalities = () => {
   const load = async () => {
     try {
       setError(null);
-      const data = await api.getPersonalities(true);
+      const data = await api.getPersonalities(false);
       setPersonalities(data);
     } catch (e: any) {
       setError(e?.message || 'Failed to load personalities');
@@ -33,6 +36,22 @@ export const Personalities = () => {
 
   useEffect(() => {
     load();
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    const loadDownloaded = async () => {
+      try {
+        const ids = await invoke<string[]>('list_downloaded_voices');
+        if (!cancelled) setDownloadedVoiceIds(new Set(Array.isArray(ids) ? ids : []));
+      } catch {
+        if (!cancelled) setDownloadedVoiceIds(new Set());
+      }
+    };
+    loadDownloaded();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   useEffect(() => {
@@ -59,8 +78,40 @@ export const Personalities = () => {
     return m;
   }, [voices]);
 
-  const visible = personalities.filter((p) => p.is_visible);
-  const hidden = personalities.filter((p) => !p.is_visible);
+  const downloadVoice = async (voiceId: string) => {
+    setDownloadingVoiceId(voiceId);
+    try {
+      await invoke<string>('download_voice', { voiceId });
+      setDownloadedVoiceIds((prev) => {
+        const next = new Set(prev);
+        next.add(voiceId);
+        return next;
+      });
+    } catch (e: any) {
+      console.error('download_voice failed', e);
+      const msg = typeof e === 'string' ? e : e?.message ? String(e.message) : String(e);
+      setError(msg || 'Failed to download voice');
+    } finally {
+      setDownloadingVoiceId(null);
+    }
+  };
+
+  const playVoice = async (voiceId: string) => {
+    if (!downloadedVoiceIds.has(voiceId)) return;
+    try {
+      let src = audioSrcByVoiceId[voiceId];
+      if (!src) {
+        const b64 = await invoke<string | null>('read_voice_base64', { voiceId });
+        if (!b64) return;
+        src = `data:audio/wav;base64,${b64}`;
+        setAudioSrcByVoiceId((prev) => ({ ...prev, [voiceId]: src! }));
+      }
+      const audio = new Audio(src);
+      await audio.play();
+    } catch (e) {
+      console.error('playVoice failed', e);
+    }
+  };
 
   const assignToActiveUser = async (personalityId: string) => {
     if (!activeUserId) {
@@ -81,13 +132,17 @@ export const Personalities = () => {
     }
   };
 
-  const toggleVisibility = async (p: any) => {
+  const deletePersonality = async (p: any, e: MouseEvent) => {
+    e.stopPropagation();
+    if (p?.is_global) return;
+    const ok = window.confirm('Delete this personality? This will also delete its sessions and conversations.');
+    if (!ok) return;
     try {
       setError(null);
-      await api.updatePersonality(p.id, { is_visible: !p.is_visible });
-      load();
-    } catch (e: any) {
-      setError(e?.message || 'Failed to update visibility');
+      await api.deletePersonality(p.id);
+      await load();
+    } catch (err: any) {
+      setError(err?.message || 'Failed to delete personality');
     }
   };
 
@@ -137,7 +192,7 @@ export const Personalities = () => {
       )}
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-        {visible.map((p) => (
+        {personalities.map((p) => (
           <div
             key={p.id}
             role="button"
@@ -146,10 +201,9 @@ export const Personalities = () => {
             onKeyDown={(e) => {
               if (e.key === 'Enter' || e.key === ' ') assignToActiveUser(p.id);
             }}
-            className={`retro-card relative group text-left cursor-pointer transition-shadow ${activeUser?.current_personality_id === p.id ? 'retro-selected' : ''}`}
+            className={`retro-card relative group text-left cursor-pointer transition-shadow ${activeUser?.current_personality_id === p.id ? 'retro-selected' : 'retro-not-selected'}`}
           >
             <div className="absolute top-4 right-4 flex items-center gap-2">
-              {/* Edit button for non-global personalities */}
               {!p.is_global && (
                 <button
                   type="button"
@@ -160,109 +214,80 @@ export const Personalities = () => {
                   <Pencil size={16} />
                 </button>
               )}
-              
-              <button
-                type="button"
-                className="retro-icon-btn"
-                aria-label="Hide personality"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  toggleVisibility(p);
-                }}
-              >
-                <EyeOff size={16} />
-              </button>
 
-            </div>
-            <div className="absolute bottom-4 right-4 flex items-center gap-2">
-              {/* Edit button for non-global personalities */}
               {!p.is_global && (
                 <button
                   type="button"
                   className="retro-icon-btn"
-                  aria-label="Edit personality"
-                  onClick={(e) => handleEdit(p, e)}
+                  aria-label="Delete personality"
+                  onClick={(e) => deletePersonality(p, e)}
+                  title="Delete"
                 >
-                  <Download size={16} />
+                  <Trash2 size={16} />
                 </button>
               )}
             </div>
-            <h3 className="text-xl font-bold mb-2">{p.name}</h3>
+
+            <h3 className="text-xl font-bold mb-2 pr-14">{p.name}</h3>
             <p className="text-gray-600 mb-4 text-sm font-medium border-l-4 border-gray-300 pl-2">
               "{p.short_description}"
             </p>
-            <div className="mb-4">
-              <Link
-                to={`/voices?voice_id=${encodeURIComponent(p.voice_id)}`}
-                onClick={(e) => e.stopPropagation()}
-                className="inline-block px-2 py-1 border border-black text-xs font-bold lowercase"
-                title="View voice"
-              >
-                {voiceById.get(p.voice_id)?.voice_name || p.voice_id}
-              </Link>
-            </div>
-            <div className="flex flex-wrap gap-2">
-              {p.tags.map((tag: string) => (
-                <span key={tag} className="px-2 py-1 border border-black text-xs font-bold lowercase">
-                  {tag}
-                </span>
-              ))}
-            </div>
-          </div>
-        ))}
-      </div>
 
-      <div className="mt-8">
-        <button
-          type="button"
-          className="retro-btn retro-btn-outline px-4 py-2 text-sm"
-          onClick={() => setShowHidden((v) => !v)}
-        >
-          {showHidden ? 'Hide Hidden Personalities' : `Show Hidden Personalities (${hidden.length})`}
-        </button>
-        {showHidden && (
-          <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-6">
-            {hidden.map((p) => (
-              <div key={p.id} className="retro-card relative">
-                <div className="absolute top-4 right-4 flex items-center gap-2">
-                  {!p.is_global && (
-                    <button
-                      type="button"
-                      className="retro-icon-btn"
-                      aria-label="Edit personality"
-                      onClick={(e) => handleEdit(p, e)}
-                    >
-                      <Pencil size={16} />
-                    </button>
-                  )}
-                  <button
-                    type="button"
-                    className="retro-icon-btn"
-                    aria-label="Unhide personality"
-                    onClick={() => toggleVisibility(p)}
-                  >
-                    <Eye size={16} />
-                  </button>
-                </div>
-                <h3 className="text-xl font-bold mb-2">{p.name}</h3>
-                <p className="text-gray-600 mb-4 text-sm font-medium border-l-4 border-gray-300 pl-2">
-                  "{p.short_description}"
-                </p>
-                <div className="mb-4">
+            <div className="mt-4 border-t-2 border-black pt-3 hover:scale-103 transition-transform">
+              <div className="flex items-center justify-between gap-3">
+                <div className="min-w-0 flex-1">
+                  <div className="text-xs font-bold uppercase">Voice used</div>
                   <Link
                     to={`/voices?voice_id=${encodeURIComponent(p.voice_id)}`}
-                    className="inline-block px-2 py-1 border border-black text-xs font-bold lowercase"
+                    onClick={(e) => e.stopPropagation()}
+                    className="block font-bold truncate"
                     title="View voice"
                   >
                     {voiceById.get(p.voice_id)?.voice_name || p.voice_id}
                   </Link>
                 </div>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
 
+                <div className="shrink-0">
+                  {downloadedVoiceIds.has(p.voice_id) ? (
+                    <button
+                      type="button"
+                      className="retro-btn retro-btn-outline"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        playVoice(p.voice_id);
+                      }}
+                      title={`Play ${p.voice_id}.wav`}
+                    >
+                      <span className="inline-flex items-center gap-2">
+                        <Play fill="currentColor" size={16} />
+                      </span>
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      className="retro-btn retro-btn-outline"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        downloadVoice(p.voice_id);
+                      }}
+                      disabled={downloadingVoiceId === p.voice_id}
+                      title={`Download ${p.voice_id}.wav`}
+                    >
+                      <span className="inline-flex items-center gap-2">
+                        {downloadingVoiceId === p.voice_id ? (
+                          <Loader2 size={16} className="animate-spin" />
+                        ) : (
+                          <Download size={16} />
+                        )}
+                      </span>
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
     </div>
   );
 };

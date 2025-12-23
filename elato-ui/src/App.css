@@ -40,6 +40,10 @@
     border: 3px solid var(--color-retro-accent);  
   }
 
+  .retro-card.retro-not-selected {
+    border: 3px solid transparent;  
+  }
+
   .retro-dots {
     background-image: radial-gradient(rgba(0, 0, 0, 0.14) 1px, transparent 1px);
     background-size: 18px 18px;

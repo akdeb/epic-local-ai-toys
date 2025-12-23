@@ -1,14 +1,14 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { api } from "../api";
 import { Modal } from "./Modal";
 import { Brain, ArrowUp } from "lucide-react";
+import logoPng from '../assets/logo.png';
 
 export type PersonalityForModal = {
   id: string;
   name: string;
   prompt: string;
   short_description: string;
-  tags: string[];
   voice_id: string;
   is_visible: boolean;
 };
@@ -29,26 +29,17 @@ export function PersonalityModal({ open, mode, personality, onClose, onSuccess }
   const [name, setName] = useState("");
   const [prompt, setPrompt] = useState("");
   const [shortDescription, setShortDescription] = useState("");
-  const [tags, setTags] = useState("");
   const [voiceId, setVoiceId] = useState("radio");
   const [voices, setVoices] = useState<any[]>([]);
   
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const parsedTags = useMemo(() => {
-    return tags
-      .split(",")
-      .map((s) => s.trim())
-      .filter(Boolean);
-  }, [tags]);
-
   const reset = () => {
     setDescription("");
     setName("");
     setPrompt("");
     setShortDescription("");
-    setTags("");
     setVoiceId("radio");
     setError(null);
   };
@@ -64,7 +55,6 @@ export function PersonalityModal({ open, mode, personality, onClose, onSuccess }
       setName(personality.name || "");
       setPrompt(personality.prompt || "");
       setShortDescription(personality.short_description || "");
-      setTags((personality.tags || []).join(", "));
       setVoiceId(personality.voice_id || "radio");
       setError(null);
     } else {
@@ -126,7 +116,6 @@ export function PersonalityModal({ open, mode, personality, onClose, onSuccess }
         name: name.trim(),
         prompt: prompt.trim(),
         short_description: shortDescription.trim(),
-        tags: parsedTags,
         voice_id: voiceId,
       };
 
@@ -155,11 +144,11 @@ export function PersonalityModal({ open, mode, personality, onClose, onSuccess }
         }}
       >
         <div className="space-y-6 text-center">
-            {error && <div className="font-mono text-sm text-red-600 mb-4">{error}</div>}
+            {error && <div className="font-mono text-sm text-red-600 mb-2">{error}</div>}
             
             <div className="flex flex-col items-center gap-2 mb-6">
-                <div className="p-3 bg-[#9b5cff] rounded-full border-2 border-black shadow-[4px_4px_0px_0px_rgba(0,0,0,1)]">
-                    <Brain fill="white" className="w-8 h-8 text-white" />
+                <div className="rounded-full border-2 border-black shadow-[4px_4px_0px_0px_rgba(0,0,0,1)]">
+                     <img src={logoPng} alt="" className="w-10 h-10" />
                 </div>
                 <h3 className="font-black text-2xl uppercase mt-2">Create Your Character</h3>
             </div>
@@ -251,16 +240,6 @@ export function PersonalityModal({ open, mode, personality, onClose, onSuccess }
                 </option>
               ))}
           </select>
-        </div>
-
-        <div>
-          <label className="block font-bold mb-2 uppercase text-sm">Tags (comma separated)</label>
-          <input
-            className="retro-input"
-            value={tags}
-            onChange={(e) => setTags(e.target.value)}
-            placeholder="e.g. helper, general, fun"
-          />
         </div>
 
         <div className="flex justify-end">

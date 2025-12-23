@@ -12,11 +12,13 @@ const NavItem = ({
   icon: Icon,
   label,
   trailingIcon: TrailingIcon,
+  trailingTooltip,
 }: {
   to: string;
   icon: any;
   label: string;
   trailingIcon?: any;
+  trailingTooltip?: string;
 }) => {
   const location = useLocation();
   const isActive = location.pathname === to;
@@ -30,6 +32,7 @@ const NavItem = ({
           ? "bg-[#ffd400] text-black" 
           : "bg-white"
       )}
+      title={trailingTooltip}
     >
       <Icon size={20} />
       <span className="font-bold flex-1">{label}</span>
@@ -87,7 +90,7 @@ export const Sidebar = () => {
           <nav className="flex flex-col">
             <NavItem to="/" icon={LayoutGrid} label="Personalities" />
             <NavItem to="/voices" icon={Volume2} label="Voices" />
-            <NavItem to="/conversations" icon={MessagesSquare} label="Sessions" trailingIcon={LockKeyhole} />
+            <NavItem to="/conversations" icon={MessagesSquare} label="Sessions" trailingIcon={LockKeyhole} trailingTooltip="Private & secure" />
             <NavItem to="/users" icon={Users} label="Members" />
             <NavItem to="/settings" icon={Cpu} label="AI Settings" />
           </nav>
