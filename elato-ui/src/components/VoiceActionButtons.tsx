@@ -9,6 +9,7 @@ type Props = {
   isPlaying: boolean;
   isPaused: boolean;
   stopPropagation?: boolean;
+  size?: "small" | "large";
 };
 
 export const VoiceActionButtons = ({
@@ -20,12 +21,13 @@ export const VoiceActionButtons = ({
   isPlaying,
   isPaused,
   stopPropagation,
+  size = "large",
 }: Props) => {
   if (isDownloaded) {
     return (
       <button
         type="button"
-        className="retro-btn retro-btn-outline"
+        className={`retro-btn retro-btn-outline ${size === "small" ? "retro-btn-sm" : ""}`}
         onClick={(e) => {
           if (stopPropagation) e.stopPropagation();
           onTogglePlay(voiceId);
@@ -34,9 +36,9 @@ export const VoiceActionButtons = ({
       >
         <span className="inline-flex items-center gap-2">
           {isPlaying && !isPaused ? (
-            <Pause fill="currentColor" size={16} />
+            <Pause fill="currentColor" size={size === "small" ? 12 : 16} />
           ) : (
-            <Play fill="currentColor" size={16} />
+            <Play fill="currentColor" size={size === "small" ? 12 : 16} />
           )}
         </span>
       </button>
@@ -46,7 +48,7 @@ export const VoiceActionButtons = ({
   return (
     <button
       type="button"
-      className="retro-btn retro-btn-outline"
+      className={`retro-btn retro-btn-outline ${size === "small" ? "retro-btn-sm" : ""}`}
       onClick={(e) => {
         if (stopPropagation) e.stopPropagation();
         onDownload(voiceId);
@@ -56,9 +58,9 @@ export const VoiceActionButtons = ({
     >
       <span className="inline-flex items-center gap-2">
         {downloadingVoiceId === voiceId ? (
-          <Loader2 size={16} className="animate-spin" />
+          <Loader2 size={size === "small" ? 12 : 16} className="animate-spin" />
         ) : (
-          <Download size={16} />
+          <Download size={size === "small" ? 12 : 16} />
         )}
       </span>
     </button>

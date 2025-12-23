@@ -18,7 +18,11 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'self' ipc: http://ipc.localhost; img-src 'self' asset: http://asset.localhost data: blob:; media-src 'self' asset: http://asset.localhost data: blob:; connect-src 'self' http://127.0.0.1:* ws://127.0.0.1:* http://localhost:* ws://localhost:* ipc:;",
+      "assetProtocol": {
+        "enable": true,
+        "scope": ["$DATA/**/images/*", "$DATA/**/images/**"]
+      }
     }
   },
   "bundle": {

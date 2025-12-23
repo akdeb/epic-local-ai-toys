@@ -1,10 +1,11 @@
-import { useEffect, useMemo, useState, type MouseEvent } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { api } from '../api';
-import { Pencil, Trash2 } from 'lucide-react';
+import { Image as ImageIcon, Pencil, Trash2 } from 'lucide-react';
 import { useActiveUser } from '../state/ActiveUserContext';
 import { PersonalityModal, PersonalityForModal } from '../components/PersonalityModal';
 import { Link } from 'react-router-dom';
 import { invoke } from '@tauri-apps/api/core';
+import { convertFileSrc } from '@tauri-apps/api/core';
 import { VoiceActionButtons } from '../components/VoiceActionButtons';
 import { useVoicePlayback } from '../hooks/useVoicePlayback';
 
@@ -13,6 +14,7 @@ export const Personalities = () => {
   const [voices, setVoices] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [brokenImgByPersonalityId, setBrokenImgByPersonalityId] = useState<Record<string, boolean>>({});
   const [downloadedVoiceIds, setDownloadedVoiceIds] = useState<Set<string>>(new Set());
   const [downloadingVoiceId, setDownloadingVoiceId] = useState<string | null>(null);
   const [audioSrcByVoiceId, setAudioSrcByVoiceId] = useState<Record<string, string>>({});
@@ -35,6 +37,13 @@ export const Personalities = () => {
 
   const { activeUserId, activeUser, refreshUsers } = useActiveUser();
 
+  const imgSrcForPersonality = (p: any) => {
+    const src = typeof p?.img_src === 'string' ? p.img_src.trim() : '';
+    if (!src) return null;
+    if (/^https?:\/\//i.test(src)) return src;
+    return convertFileSrc(src);
+  };
+
   const toTimestamp = (v: any) => {
     if (v == null) return 0;
     if (typeof v === 'number') return Number.isFinite(v) ? v : 0;
@@ -52,6 +61,7 @@ export const Personalities = () => {
       setError(null);
       const data = await api.getPersonalities(false);
       setPersonalities(data);
+      setBrokenImgByPersonalityId({});
     } catch (e: any) {
       setError(e?.message || 'Failed to load personalities');
     } finally {
@@ -123,6 +133,11 @@ export const Personalities = () => {
         next.add(voiceId);
         return next;
       });
+      try {
+        window.dispatchEvent(new CustomEvent('voice:downloaded', { detail: { voiceId } }));
+      } catch {
+        // ignore
+      }
     } catch (e: any) {
       console.error('download_voice failed', e);
       const msg = typeof e === 'string' ? e : e?.message ? String(e.message) : String(e);
@@ -160,11 +175,8 @@ export const Personalities = () => {
     }
   };
 
-  const deletePersonality = async (p: any, e: MouseEvent) => {
-    e.stopPropagation();
+  const deletePersonality = async (p: any) => {
     if (p?.is_global) return;
-    const ok = window.confirm('Delete this personality? This will also delete its sessions and conversations.');
-    if (!ok) return;
     try {
       setError(null);
       await api.deletePersonality(p.id);
@@ -231,13 +243,14 @@ export const Personalities = () => {
             }}
             className={`retro-card relative group text-left cursor-pointer transition-shadow flex flex-col ${activeUser?.current_personality_id === p.id ? 'retro-selected' : 'retro-not-selected'}`}
           >
-            <div className="absolute top-4 right-4 flex items-center gap-2">
+            <div className="absolute top-2 right-2 flex flex-col items-center gap-2 z-10">
               {!p.is_global && (
                 <button
                   type="button"
                   className="retro-icon-btn"
                   aria-label="Edit personality"
                   onClick={(e) => handleEdit(p, e)}
+                  title="Edit"
                 >
                   <Pencil size={16} />
                 </button>
@@ -248,7 +261,10 @@ export const Personalities = () => {
                   type="button"
                   className="retro-icon-btn"
                   aria-label="Delete personality"
-                  onClick={(e) => deletePersonality(p, e)}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    void deletePersonality(p);
+                  }}
                   title="Delete"
                 >
                   <Trash2 size={16} />
@@ -256,19 +272,94 @@ export const Personalities = () => {
               )}
             </div>
 
-            <h3 className="text-xl font-bold mb-2 pr-14">{p.name}</h3>
-            <p className="text-gray-600 mb-4 text-sm font-medium border-l-4 border-gray-300 pl-2">
-              "{p.short_description}"
-            </p>
+            <div className="flex flex-col items-start gap-4 pr-6">
+              {!p.is_global ? (
+                <label
+                  className={`w-full h-[100px] rounded-[14px] ${imgSrcForPersonality(p) ? 'border-2 border-[#aaa]' : 'retro-dotted'} bg-white flex items-center justify-center cursor-pointer overflow-hidden`}
+                  title="Upload character image"
+                  onClick={(e) => e.stopPropagation()}
+                  onKeyDown={(e) => {
+                    e.stopPropagation();
+                  }}
+                >
+                  {imgSrcForPersonality(p) && !brokenImgByPersonalityId[String(p.id)] ? (
+                    <img
+                      src={imgSrcForPersonality(p) || ''}
+                      alt=""
+                      className="w-full h-full object-cover"
+                      onError={() => {
+                        setBrokenImgByPersonalityId((prev) => ({ ...prev, [String(p.id)]: true }));
+                      }}
+                    />
+                  ) : (
+                    <ImageIcon size={18} className="text-gray-600" />
+                  )}
+                  <input
+                    type="file"
+                    accept="image/*"
+                    className="hidden"
+                    onClick={(e) => e.stopPropagation()}
+                    onChange={async (e) => {
+                      const f = e.target.files?.[0] || null;
+                      if (!f) return;
+                      try {
+                        const buf = await f.arrayBuffer();
+                        let binary = '';
+                        const bytes = new Uint8Array(buf);
+                        const chunkSize = 0x8000;
+                        for (let i = 0; i < bytes.length; i += chunkSize) {
+                          const chunk = bytes.subarray(i, i + chunkSize);
+                          binary += String.fromCharCode(...chunk);
+                        }
+                        const b64 = btoa(binary);
+                        const ext = (f.name.split('.').pop() || '').toLowerCase();
+                        const savedPath = await invoke<string>('save_personality_image_base64', {
+                          personalityId: String(p.id),
+                          base64Image: b64,
+                          ext: ext || null,
+                        });
 
-            <div className="mt-auto border-t-2 border-black pt-3 hover:scale-103 transition-transform">
+                        await api.updatePersonality(String(p.id), { img_src: savedPath });
+                        await load();
+                      } catch (err: any) {
+                        setError(err?.message || 'Failed to save image');
+                      }
+                    }}
+                  />
+                </label>
+              ) : (
+                <div className="w-full h-[100px] rounded-[14px] retro-dotted bg-white flex items-center justify-center overflow-hidden">
+                  {imgSrcForPersonality(p) && !brokenImgByPersonalityId[String(p.id)] ? (
+                    <img
+                      src={imgSrcForPersonality(p) || ''}
+                      alt=""
+                      className="w-full h-full object-cover"
+                      onError={() => {
+                        setBrokenImgByPersonalityId((prev) => ({ ...prev, [String(p.id)]: true }));
+                      }}
+                    />
+                  ) : (
+                    <ImageIcon size={18} className="text-gray-600" />
+                  )}
+                </div>
+              )}
+
+              <div className="min-w-0 flex-1 mb-2">
+                <h3 className="text-xl font-black leading-tight break-words retro-clamp-2">{p.name}</h3>
+                <p className="text-gray-600 text-sm font-medium mt-2 retro-clamp-2">
+                  {p.short_description ? String(p.short_description) : '—'}
+                </p>
+              </div>
+            </div>
+
+            <div className="mt-auto border-t-2 border-black pt-3">
               <div className="flex items-center justify-between gap-3">
                 <div className="min-w-0 flex-1">
-                  <div className="text-xs font-bold uppercase">Voice</div>
+                  <div className="text-xs font-bold uppercase tracking-wider text-gray-500">Voice</div>
                   <Link
                     to={`/voices?voice_id=${encodeURIComponent(p.voice_id)}`}
                     onClick={(e) => e.stopPropagation()}
-                    className="block font-bold truncate"
+                    className="block text-xs font-bold truncate"
                     title="View voice"
                   >
                     {voiceById.get(p.voice_id)?.voice_name || p.voice_id}
@@ -285,6 +376,7 @@ export const Personalities = () => {
                     isPlaying={playingVoiceId === String(p.voice_id)}
                     isPaused={isPaused}
                     stopPropagation
+                    size="small"
                   />
                 </div>
               </div>

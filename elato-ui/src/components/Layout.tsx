@@ -6,14 +6,17 @@ import { api } from '../api';
 import { useEffect, useState } from 'react';
 import { Bot, ShieldCheck, Sparkles, X } from 'lucide-react';
 import { VoiceWsProvider, useVoiceWs } from '../state/VoiceWsContext';
+import { invoke } from '@tauri-apps/api/core';
 
 const LayoutInner = () => {
   const { activeUser } = useActiveUser();
   const navigate = useNavigate();
   const voiceWs = useVoiceWs();
   const [activePersonalityName, setActivePersonalityName] = useState<string | null>(null);
+  const [activeVoiceId, setActiveVoiceId] = useState<string | null>(null);
   const [deviceConnected, setDeviceConnected] = useState<boolean>(false);
   const [deviceSessionId, setDeviceSessionId] = useState<string | null>(null);
+  const [downloadedVoiceIds, setDownloadedVoiceIds] = useState<Set<string>>(new Set());
 
   const sessionActive = deviceConnected || voiceWs.isActive;
 
@@ -43,7 +46,10 @@ const LayoutInner = () => {
 
         const ps = await api.getPersonalities(true).catch(() => []);
         const selected = ps.find((p: any) => p.id === selectedId);
-        if (!cancelled) setActivePersonalityName(selected?.name || null);
+        if (!cancelled) {
+          setActivePersonalityName(selected?.name || null);
+          setActiveVoiceId(selected?.voice_id ? String(selected.voice_id) : null);
+        }
       } catch {
         // ignore
       }
@@ -51,6 +57,57 @@ const LayoutInner = () => {
 
     load();
   }, [activeUser?.current_personality_id]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const loadDownloaded = async () => {
+      try {
+        const ids = await invoke<string[]>('list_downloaded_voices');
+        if (!cancelled) setDownloadedVoiceIds(new Set(Array.isArray(ids) ? ids : []));
+      } catch {
+        if (!cancelled) setDownloadedVoiceIds(new Set());
+      }
+    };
+    loadDownloaded();
+    return () => {
+      cancelled = true;
+    };
+  }, [activeVoiceId]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const refresh = async () => {
+      try {
+        const ids = await invoke<string[]>('list_downloaded_voices');
+        if (!cancelled) setDownloadedVoiceIds(new Set(Array.isArray(ids) ? ids : []));
+      } catch {
+        if (!cancelled) setDownloadedVoiceIds(new Set());
+      }
+    };
+
+    const onDownloaded = () => {
+      void refresh();
+    };
+
+    window.addEventListener('voice:downloaded', onDownloaded as EventListener);
+    return () => {
+      cancelled = true;
+      window.removeEventListener('voice:downloaded', onDownloaded as EventListener);
+    };
+  }, []);
+
+  const canStartChat =
+    sessionActive || !activeVoiceId || downloadedVoiceIds.has(String(activeVoiceId));
+
+  useEffect(() => {
+    const onDeleted = () => {
+      navigate('/');
+    };
+    window.addEventListener('voicews:empty-session-deleted', onDeleted as EventListener);
+    return () => {
+      window.removeEventListener('voicews:empty-session-deleted', onDeleted as EventListener);
+    };
+  }, [navigate]);
 
   return (
     <div className="flex h-screen overflow-hidden bg-[#f6f0e6] retro-dots">
@@ -61,7 +118,7 @@ const LayoutInner = () => {
         </div>
 
         {activeUser?.current_personality_id && (
-          <div className="fixed bottom-0 left-64 right-0 pointer-events-none">
+          <div className="fixed bottom-0 z-20 left-64 right-0 pointer-events-none">
             <div className="max-w-4xl mx-auto px-8 pb-6 pointer-events-auto">
               <div className={`bg-white border-3 ${borderClass} rounded-full px-5 py-4 flex items-center justify-between shadow-[0_10px_24px_rgba(0,0,0,0.14)]`}>
                 <div className="min-w-0">
@@ -79,19 +136,28 @@ const LayoutInner = () => {
                 </div>
 
                 <div className="flex items-center gap-3">
-                  <button
-                    type="button"
-                    className={`retro-btn  ${sessionActive ? 'retro-btn-green' : '' } px-4 py-2 text-sm flex items-center gap-2`}
-                    onClick={() => {
-                      navigate('/test');
-                      if (!sessionActive) {
-                        voiceWs.connect();
-                      }
-                    }}
-                  >
-                  {sessionActive ? <Sparkles fill='currentColor' size={18} className="flex-shrink-0" /> : <Bot size={18} className="flex-shrink-0" />}
-                  {sessionActive ? 'View' : 'Test'}
-                  </button>
+                  <div className="flex flex-col items-end">
+                    <button
+                      type="button"
+                      className={`retro-btn  ${sessionActive ? 'retro-btn-green' : '' } px-4 py-2 text-sm flex items-center gap-2 disabled:opacity-60 disabled:cursor-not-allowed`}
+                      onClick={() => {
+                        if (!canStartChat) return;
+                        navigate('/test');
+                        if (!sessionActive) {
+                          voiceWs.connect();
+                        }
+                      }}
+                      disabled={!canStartChat}
+                    >
+                    {sessionActive ? <Sparkles fill='currentColor' size={18} className="flex-shrink-0" /> : <Bot size={18} className="flex-shrink-0" />}
+                    {sessionActive ? 'View' : 'Test'}
+                    </button>
+                    {!canStartChat && (
+                      <div className="mt-1 font-mono text-xs text-gray-500">
+                        Download voice to start chat
+                      </div>
+                    )}
+                  </div>
 
                   {sessionActive && (
                     <button

@@ -141,7 +141,7 @@ export const Settings = () => {
                 type="text" 
                 value={llmRepo}
                 onChange={(e) => setLlmRepo(e.target.value)}
-                placeholder="e.g. mlx-community/Qwen2.5-0.5B-Instruct-4bit"
+                placeholder="e.g. mlx-community/Ministral-3-3B-Instruct-2512-4bit"
                 className="retro-input flex-1 bg-white" 
               />
               <button 

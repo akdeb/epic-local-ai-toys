@@ -66,6 +66,7 @@ class Personality:
     is_visible: bool
     is_global: bool
     voice_id: str  # Added to map to tts voice (dave, jo, mara, santa)
+    img_src: Optional[str] = None
     created_at: Optional[float] = None
 
 @dataclass
@@ -538,6 +539,7 @@ class DBService:
                 name = item.get("name")
                 prompt = item.get("prompt")
                 short_desc = item.get("short_description")
+                img_src = item.get("img_src")
                 voice_id = item.get("voice_id")
                 if not p_id or not name or not prompt or voice_id is None:
                     continue
@@ -552,8 +554,8 @@ class DBService:
 
                 cursor.execute(
                     """
-                    INSERT INTO personalities (id, name, prompt, short_description, tags, is_visible, voice_id, is_global, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO personalities (id, name, prompt, short_description, tags, is_visible, voice_id, is_global, img_src, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(id) DO UPDATE SET
                       name = excluded.name,
                       prompt = excluded.prompt,
@@ -562,6 +564,7 @@ class DBService:
                       is_visible = excluded.is_visible,
                       voice_id = excluded.voice_id,
                       is_global = excluded.is_global,
+                      img_src = excluded.img_src,
                       created_at = COALESCE(personalities.created_at, excluded.created_at)
                     """,
                     (
@@ -573,6 +576,7 @@ class DBService:
                         True,
                         str(voice_id),
                         True,
+                        str(img_src or ""),
                         time.time(),
                     ),
                 )
@@ -708,6 +712,7 @@ class DBService:
         voice_id: str,
         is_visible: bool = True,
         is_global: bool = False,
+        img_src: Optional[str] = None,
     ) -> Personality:
         if self.get_voice(voice_id) is None:
             voice_id = "radio"
@@ -718,13 +723,13 @@ class DBService:
 
         created_at = time.time()
         cursor.execute(
-            "INSERT INTO personalities (id, name, prompt, short_description, tags, is_visible, voice_id, is_global, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (p_id, name, prompt, short_description, json.dumps(tags), is_visible, voice_id, is_global, created_at),
+            "INSERT INTO personalities (id, name, prompt, short_description, tags, is_visible, voice_id, is_global, img_src, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (p_id, name, prompt, short_description, json.dumps(tags), is_visible, voice_id, is_global, img_src, created_at),
         )
 
         conn.commit()
         conn.close()
-        return Personality(p_id, name, prompt, short_description, tags, is_visible, is_global, voice_id, created_at)
+        return Personality(p_id, name, prompt, short_description, tags, is_visible, is_global, voice_id, img_src, created_at)
 
     def get_personalities(self, include_hidden: bool = False) -> List[Personality]:
         conn = self._get_conn()
@@ -755,6 +760,7 @@ class DBService:
                     is_visible=bool(row["is_visible"]),
                     is_global=is_global,
                     voice_id=row["voice_id"],
+                    img_src=row["img_src"] if "img_src" in row.keys() else None,
                     created_at=row["created_at"] if "created_at" in row.keys() else None,
                 )
             )
@@ -782,6 +788,7 @@ class DBService:
                 is_visible=bool(row["is_visible"]),
                 is_global=is_global,
                 voice_id=row["voice_id"],
+                img_src=row["img_src"] if "img_src" in row.keys() else None,
             )
         return None
     
@@ -807,6 +814,7 @@ class DBService:
                 is_visible=bool(row["is_visible"]),
                 is_global=is_global,
                 voice_id=row["voice_id"],
+                img_src=row["img_src"] if "img_src" in row.keys() else None,
             )
         return None
 
@@ -814,6 +822,10 @@ class DBService:
         current = self.get_personality(p_id)
         if not current:
             return None
+
+        if getattr(current, "is_global", False) and "img_src" in kwargs:
+            kwargs = dict(kwargs)
+            kwargs.pop("img_src", None)
             
         # Prepare updates
         fields = []
@@ -839,6 +851,10 @@ class DBService:
                 kwargs["voice_id"] = "radio"
             fields.append("voice_id = ?")
             values.append(kwargs["voice_id"])
+
+        if "img_src" in kwargs:
+            fields.append("img_src = ?")
+            values.append(kwargs["img_src"])
 
         if not fields:
             return current
@@ -887,7 +903,7 @@ class DBService:
             except Exception:
                 pass
 
-        cursor.execute("DELETE FROM personalities WHERE id = ? AND is_global = 0", (p_id,))
+        cursor.execute("DELETE FROM personalities WHERE id = ? AND COALESCE(is_global, 0) = 0", (p_id,))
         success = cursor.rowcount > 0
         conn.commit()
         conn.close()

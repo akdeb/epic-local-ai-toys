@@ -81,7 +81,7 @@ export const Sidebar = () => {
       <div className="border-2 border-black rounded-[24px] overflow-hidden">
         <div className="p-4 bg-[#CF79FF] text-white">
           <div className="flex items-center gap-2">
-            <img src={logoPng} alt="" className="w-10 h-10" />
+            <img src={logoPng} alt="" className="w-12 h-12" />
             <h1 className="text-2xl tracking-wider brand-font mt-1 text-white">ELATO</h1>
           </div>
           <p className="text-xs font-mono opacity-90">Epic Local AI Toys</p>

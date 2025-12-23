@@ -1,7 +1,9 @@
 import io
 import struct
-from pydub import AudioSegment
 
+STT = "mlx-community/whisper-large-v3-turbo"
+LLM = "mlx-community/Ministral-3-3B-Instruct-2512-4bit"
+TTS = "mlx-community/chatterbox-turbo-4bit"
 
 def create_wav_header(sample_rate: int, num_channels: int, bits_per_sample: int, data_size: int) -> bytes:
     header = b'RIFF'
@@ -22,6 +24,7 @@ def create_wav_header(sample_rate: int, num_channels: int, bits_per_sample: int,
 
 def convert_audio_format(audio_data: bytes, format: str) -> bytes:
     try:
+        from pydub import AudioSegment
         audio_segment = AudioSegment.from_wav(io.BytesIO(audio_data))
         
         if format == "mp3":

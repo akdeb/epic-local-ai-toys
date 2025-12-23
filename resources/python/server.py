@@ -27,6 +27,7 @@ from mlx_audio.stt.models.whisper import Model as Whisper
 from tts import ChatterboxTTS
 import db_service  # DB ops exposed via HTTP endpoints
 from fastapi.middleware.cors import CORSMiddleware
+from utils import STT, LLM, TTS
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
@@ -58,8 +59,8 @@ class VoicePipeline:
         output_sample_rate=24_000,
         streaming_interval=1.5,
         frame_duration_ms=30,
-        stt_model="mlx-community/whisper-large-v3-turbo",
-        llm_model="Qwen/Qwen2.5-0.5B-Instruct-4bit",
+        stt_model=STT,
+        llm_model=LLM,
         tts_ref_audio: str | None = None,
     ):
         self.silence_threshold = silence_threshold
@@ -70,7 +71,7 @@ class VoicePipeline:
         self.frame_duration_ms = frame_duration_ms
 
         # Hardcoded STT model as requested
-        self.stt_model_id = "mlx-community/whisper-large-v3-turbo"
+        self.stt_model_id = STT
         # LLM model is dynamic
         self.llm_model = llm_model
         self.tts_ref_audio = tts_ref_audio
@@ -89,7 +90,7 @@ class VoicePipeline:
         # Initialize Chatterbox TTS
         logger.info("Loading Chatterbox TTS...")
         self.tts = ChatterboxTTS(
-            model_id="mlx-community/chatterbox-turbo-4bit",
+            model_id=TTS,
             # ref_audio_path=self.tts_ref_audio,
             output_sample_rate=self.output_sample_rate,
             stream=True,
@@ -242,9 +243,9 @@ async def lifespan(app: FastAPI):
 
     # Set defaults if not already set (e.g. running via uvicorn directly)
     if not hasattr(app.state, "stt_model"):
-        app.state.stt_model = "mlx-community/whisper-large-v3-turbo"
+        app.state.stt_model = STT
     if not hasattr(app.state, "llm_model"):
-        app.state.llm_model = "mlx-community/Qwen2.5-0.5B-Instruct-4bit"
+        app.state.llm_model = LLM
     # if not hasattr(app.state, "tts_ref_audio"):
     #     app.state.tts_ref_audio = os.path.join(os.path.dirname(__file__), "tts", "santa.wav")
     if not hasattr(app.state, "silence_threshold"):
@@ -744,7 +745,7 @@ async def get_models():
     return {
         "llm": {
             "backend": "mlx",
-            "repo": db_service.db_service.get_setting("llm_model") or "mlx-community/Qwen2.5-0.5B-Instruct-4bit",
+            "repo": db_service.db_service.get_setting("llm_model") or LLM,
             "file": None,
             "context_window": 4096,
             "loaded": pipeline is not None and pipeline.llm is not None,
@@ -876,6 +877,7 @@ async def get_personalities(include_hidden: bool = False):
             "is_visible": p.is_visible,
             "is_global": p.is_global,
             "voice_id": p.voice_id,
+            "img_src": getattr(p, "img_src", None),
             "created_at": getattr(p, "created_at", None),
         }
         for p in personalities
@@ -888,6 +890,7 @@ class PersonalityCreate(BaseModel):
     tags: list = []
     voice_id: str = "radio"
     is_global: bool = False
+    img_src: Optional[str] = None
 
 @app.post("/personalities")
 async def create_personality(body: PersonalityCreate):
@@ -899,6 +902,7 @@ async def create_personality(body: PersonalityCreate):
         tags=body.tags,
         voice_id=body.voice_id,
         is_global=False,
+        img_src=body.img_src,
     )
     return {"id": p.id, "name": p.name}
 
@@ -949,7 +953,8 @@ async def generate_personality(body: GeneratePersonalityRequest):
         "prompt": p.prompt,
         "short_description": p.short_description,
         "tags": p.tags,
-        "voice_id": p.voice_id
+        "voice_id": p.voice_id,
+        "img_src": getattr(p, "img_src", None),
     }
 
 @app.put("/personalities/{personality_id}")
@@ -1288,13 +1293,13 @@ def main():
     parser.add_argument(
         "--stt_model",
         type=str,
-        default="mlx-community/whisper-large-v3-turbo",
+        default=STT,
         help="STT model",
     )
     parser.add_argument(
         "--llm_model",
         type=str,
-        default="mlx-community/Qwen2.5-0.5B-Instruct-4bit",
+        default=LLM,
         help="LLM model",
     )
     # default_ref_audio = os.path.join(os.path.dirname(__file__), "tts", "santa.wav")

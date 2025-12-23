@@ -195,7 +195,7 @@ export const Conversations = () => {
             <button
               key={s.id}
               type="button"
-              className="w-full text-left bg-white border border-black rounded-[18px] px-4 py-4 hover:bg-[#fff3b0] transition-colors retro-shadow-sm"
+              className="retro-card w-full text-left bg-white rounded-[18px] px-4 py-4 hover:bg-[#fff3b0] transition-colors"
               onClick={() => openSession(s.id)}
             >
               <div className="flex items-center justify-between gap-4">

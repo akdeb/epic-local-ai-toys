@@ -87,7 +87,7 @@ export const UsersPage = () => {
 
       <div className="grid grid-cols-1 gap-4">
         {users.map((u) => (
-          <div key={u.id} className="retro-card flex flex-col sm:flex-row items-start sm:items-center justify-between relative gap-4">
+          <div key={u.id} className="retro-card relative flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
             <button
               type="button"
               className="retro-icon-btn absolute top-3 right-3"
@@ -116,11 +116,11 @@ export const UsersPage = () => {
               </div>
             </div>
             
-            <div className="flex flex-col items-end gap-2 pr-8 w-full sm:w-[320px] sm:max-w-[45%]">
+            <div className="flex flex-col items-end gap-2 pr-8 w-full sm:w-[320px] sm:max-w-[45%] overflow-hidden">
               <div className="text-xs font-bold uppercase tracking-wider text-gray-500">
                 About you
               </div>
-              <div className="font-mono text-xs text-gray-700 text-right whitespace-pre-wrap break-words">
+              <div className="font-mono text-xs text-gray-700 text-right whitespace-pre-wrap break-all retro-clamp-3">
                 {u.about_you ? String(u.about_you) : '—'}
               </div>
             </div>

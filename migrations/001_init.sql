@@ -51,3 +51,38 @@ CREATE TABLE IF NOT EXISTS users (
   device_volume INTEGER DEFAULT 70,
   FOREIGN KEY (current_personality_id) REFERENCES personalities (id)
 );
+
+ALTER TABLE personalities ADD COLUMN is_global BOOLEAN DEFAULT 0;
+
+PRAGMA foreign_keys=ON;
+
+CREATE TABLE IF NOT EXISTS voices (
+  voice_id TEXT PRIMARY KEY,
+  gender TEXT,
+  voice_name TEXT NOT NULL,
+  voice_description TEXT,
+  voice_src TEXT,
+  is_global BOOLEAN DEFAULT 0
+);
+
+ALTER TABLE personalities ADD COLUMN img_src TEXT;
+
+PRAGMA foreign_keys=OFF;
+
+-- Add created_at for ordering
+ALTER TABLE voices ADD COLUMN created_at REAL;
+UPDATE voices SET created_at = COALESCE(created_at, strftime('%s','now'));
+
+ALTER TABLE personalities ADD COLUMN created_at REAL;
+UPDATE personalities SET created_at = COALESCE(created_at, strftime('%s','now'));
+
+-- Replace hobbies tags with a single about_you string (keep hobbies column for backward compatibility)
+ALTER TABLE users ADD COLUMN about_you TEXT;
+UPDATE users SET about_you = COALESCE(about_you, '');
+
+-- Global (per-laptop) volume lives in app_state
+INSERT INTO app_state (key, value)
+VALUES ('laptop_volume', '70')
+ON CONFLICT(key) DO NOTHING;
+
+PRAGMA foreign_keys=ON;

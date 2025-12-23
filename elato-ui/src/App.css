@@ -38,6 +38,26 @@
     animation: retro-blink 1.8s ease-in-out infinite;
   }
 
+  .retro-clamp-2 {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    overflow: hidden;
+  }
+
+  .retro-clamp-3 {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 3;
+    line-clamp: 3;
+    overflow: hidden;
+  }
+
+  .retro-dotted {
+    border: 2px dashed #aaa;
+  }
+
   .retro-shadow {
     box-shadow: var(--shadow-retro);
     border: 1px solid #000000;
@@ -79,6 +99,11 @@
     border-radius: var(--radius-retro-sm);
     transition: all 0.15s;
     cursor: pointer;
+  }
+
+  .retro-btn-sm {
+    padding: 0.25rem 0.5rem;
+    font-size: 0.75rem;
   }
 
   .retro-btn-purple {
@@ -133,7 +158,7 @@
   .retro-card {
     background-color: white;
     padding: 1.5rem;
-    border: 1px solid black;
+    /* border: 1px solid black; */
     box-shadow: var(--shadow-retro-sm);
     border-radius: var(--radius-retro);
   }

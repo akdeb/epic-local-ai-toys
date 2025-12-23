@@ -15,6 +15,10 @@ mod python_setup;
 
 struct ApiProcess(Mutex<Option<Child>>);
 
+const STT: &str = "mlx-community/whisper-large-v3-turbo";
+const LLM: &str = "mlx-community/Ministral-3-3B-Instruct-2512-4bit";
+const TTS: &str = "mlx-community/chatterbox-turbo-4bit";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SetupStatus {
     pub python_installed: bool,
@@ -49,6 +53,10 @@ fn get_elato_dir(app: &AppHandle) -> PathBuf {
 
 fn get_voices_dir(app: &AppHandle) -> PathBuf {
     get_elato_dir(app).join("voices")
+}
+
+fn get_images_dir(app: &AppHandle) -> PathBuf {
+    get_elato_dir(app).join("images")
 }
 
 fn get_venv_path(app: &AppHandle) -> PathBuf {
@@ -224,6 +232,33 @@ fn save_voice_wav_base64(app: AppHandle, voice_id: String, base64_wav: String) -
 }
 
 #[tauri::command]
+fn save_personality_image_base64(
+    app: AppHandle,
+    personality_id: String,
+    base64_image: String,
+    ext: Option<String>,
+) -> Result<String, String> {
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(base64_image)
+        .map_err(|e| format!("Failed to decode base64 image: {}", e))?;
+
+    let safe_ext = ext
+        .unwrap_or_else(|| "png".to_string())
+        .to_lowercase()
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect::<String>();
+
+    let safe_ext = if safe_ext.is_empty() { "png".to_string() } else { safe_ext };
+
+    let dir = get_images_dir(&app);
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let path = dir.join(format!("personality_{}.{}", personality_id, safe_ext));
+    fs::write(&path, &bytes).map_err(|e| e.to_string())?;
+    Ok(path.to_string_lossy().to_string())
+}
+
+#[tauri::command]
 fn read_voice_base64(app: AppHandle, voice_id: String) -> Result<Option<String>, String> {
     let path = get_voices_dir(&app).join(format!("{}.wav", voice_id));
     if !path.exists() {
@@ -388,15 +423,15 @@ async fn check_models_status(_app: AppHandle) -> Result<ModelStatus, String> {
             id: "stt".to_string(),
             name: "Whisper Large V3 Turbo".to_string(),
             model_type: "stt".to_string(),
-            repo_id: "mlx-community/whisper-large-v3-turbo".to_string(),
+            repo_id: STT.to_string(),
             downloaded: false,
             size_estimate: None,
         },
         ModelInfo {
             id: "llm".to_string(),
-            name: "Qwen 2.5 0.5B Instruct (4-bit)".to_string(),
+            name: "Ministral 3 3B Instruct (2512)".to_string(),
             model_type: "llm".to_string(),
-            repo_id: "mlx-community/Qwen2.5-0.5B-Instruct-4bit".to_string(),
+            repo_id: LLM.to_string(),
             downloaded: false,
             size_estimate: None,
         },
@@ -404,7 +439,7 @@ async fn check_models_status(_app: AppHandle) -> Result<ModelStatus, String> {
             id: "tts".to_string(),
             name: "Chatterbox TTS Turbo (4-bit)".to_string(),
             model_type: "tts".to_string(),
-            repo_id: "mlx-community/chatterbox-turbo-4bit".to_string(),
+            repo_id: TTS.to_string(),
             downloaded: false,
             size_estimate: None,
         },
@@ -533,9 +568,9 @@ async fn download_model(app: AppHandle, repo_id: String) -> Result<String, Strin
 #[tauri::command]
 async fn download_all_models(app: AppHandle) -> Result<String, String> {
     let models = vec![
-        "mlx-community/whisper-large-v3-turbo",
-        "mlx-community/Qwen2.5-0.5B-Instruct-4bit",
-        "mlx-community/chatterbox-turbo-4bit",
+        STT,
+        LLM,
+        TTS,
     ];
 
     for repo_id in models {
@@ -643,6 +678,7 @@ pub fn run() {
             greet,
             download_voice,
             save_voice_wav_base64,
+            save_personality_image_base64,
             read_voice_base64,
             list_downloaded_voices,
             get_voice_path,
