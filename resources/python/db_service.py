@@ -7,6 +7,7 @@ import glob
 import random
 import sys
 import logging
+import urllib.request
 from pathlib import Path
 from typing import List, Optional, Dict, Any
 from dataclasses import dataclass
@@ -65,6 +66,7 @@ class Personality:
     is_visible: bool
     is_global: bool
     voice_id: str  # Added to map to tts voice (dave, jo, mara, santa)
+    created_at: Optional[float] = None
 
 @dataclass
 class Voice:
@@ -74,6 +76,7 @@ class Voice:
     voice_description: Optional[str]
     voice_src: Optional[str]
     is_global: bool
+    created_at: Optional[float] = None
 
 @dataclass
 class Conversation:
@@ -89,12 +92,11 @@ class User:
     name: str
     age: Optional[int]
     dob: Optional[str]
-    hobbies: List[str]
+    about_you: str
     personality_type: Optional[str]
     likes: List[str]
     current_personality_id: Optional[str]
     user_type: str = "family"
-    device_volume: int = 70
 
 @dataclass
 class Session:
@@ -116,9 +118,26 @@ class DBService:
                 Path(self.db_path).expanduser().parent.mkdir(parents=True, exist_ok=True)
             except Exception:
                 pass
+        self.seeded_ok = False
         self._maybe_reset_db()
         self._apply_migrations()
         self._seed_defaults()
+        self.seeded_ok = True
+
+    def get_table_count(self, table: str) -> int:
+        try:
+            conn = self._get_conn()
+            cursor = conn.cursor()
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,))
+            if not cursor.fetchone():
+                conn.close()
+                return 0
+            cursor.execute(f"SELECT COUNT(1) AS n FROM {table}")
+            row = cursor.fetchone()
+            conn.close()
+            return int(row["n"]) if row and row["n"] is not None else 0
+        except Exception:
+            return 0
 
     def _get_conn(self):
         conn = sqlite3.connect(self.db_path)
@@ -438,19 +457,37 @@ class DBService:
                 assets_dir = candidate
                 break
 
-        voices_payload = None
-        personalities_payload = None
-        if assets_dir:
+        def _load_json_url(url: str) -> Optional[Any]:
             try:
-                with open(os.path.join(assets_dir, "voices.json"), "r", encoding="utf-8") as f:
-                    voices_payload = json.load(f)
+                with urllib.request.urlopen(url, timeout=10) as resp:
+                    return json.loads(resp.read().decode("utf-8"))
             except Exception:
-                voices_payload = None
+                return None
+
+        def _load_json_file(path: str) -> Optional[Any]:
             try:
-                with open(os.path.join(assets_dir, "personalities.json"), "r", encoding="utf-8") as f:
-                    personalities_payload = json.load(f)
+                with open(path, "r", encoding="utf-8") as f:
+                    return json.load(f)
             except Exception:
-                personalities_payload = None
+                return None
+
+        voices_url = os.environ.get(
+            "ELATO_VOICES_JSON_URL",
+            "https://raw.githubusercontent.com/akdeb/epic-local-ai-toys/refs/heads/main/elato-ui/src/assets/voices.json",
+        )
+        personalities_url = os.environ.get(
+            "ELATO_PERSONALITIES_JSON_URL",
+            "https://raw.githubusercontent.com/akdeb/epic-local-ai-toys/refs/heads/main/elato-ui/src/assets/personalities.json",
+        )
+
+        voices_payload = _load_json_url(voices_url)
+        personalities_payload = _load_json_url(personalities_url)
+
+        # Fallback to local assets for dev/offline.
+        if voices_payload is None and assets_dir:
+            voices_payload = _load_json_file(os.path.join(assets_dir, "voices.json"))
+        if personalities_payload is None and assets_dir:
+            personalities_payload = _load_json_file(os.path.join(assets_dir, "personalities.json"))
 
         if has_voices_table and isinstance(voices_payload, list):
             for item in voices_payload:
@@ -462,14 +499,15 @@ class DBService:
                     continue
                 cursor.execute(
                     """
-                    INSERT INTO voices (voice_id, gender, voice_name, voice_description, voice_src, is_global)
-                    VALUES (?, ?, ?, ?, ?, ?)
+                    INSERT INTO voices (voice_id, gender, voice_name, voice_description, voice_src, is_global, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(voice_id) DO UPDATE SET
                       gender = excluded.gender,
                       voice_name = excluded.voice_name,
                       voice_description = excluded.voice_description,
                       voice_src = excluded.voice_src,
-                      is_global = excluded.is_global
+                      is_global = excluded.is_global,
+                      created_at = COALESCE(voices.created_at, excluded.created_at)
                     """,
                     (
                         str(vid),
@@ -478,8 +516,12 @@ class DBService:
                         item.get("voice_description") or item.get("description"),
                         item.get("voice_src") or item.get("src"),
                         True,
+                        time.time(),
                     ),
                 )
+
+            # Ensure voice inserts are visible even if later logic uses a different connection.
+            conn.commit()
 
         # Seed personalities from local personalities.json (ignore if table missing)
         try:
@@ -501,13 +543,17 @@ class DBService:
                     continue
 
                 # Enforce many-to-one relationship: personality.voice_id must exist in voices table.
-                if self.get_voice(str(voice_id)) is None:
+                try:
+                    cursor.execute("SELECT 1 FROM voices WHERE voice_id = ? LIMIT 1", (str(voice_id),))
+                    if not cursor.fetchone():
+                        continue
+                except Exception:
                     continue
 
                 cursor.execute(
                     """
-                    INSERT INTO personalities (id, name, prompt, short_description, tags, is_visible, voice_id, is_global)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO personalities (id, name, prompt, short_description, tags, is_visible, voice_id, is_global, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(id) DO UPDATE SET
                       name = excluded.name,
                       prompt = excluded.prompt,
@@ -515,7 +561,8 @@ class DBService:
                       tags = excluded.tags,
                       is_visible = excluded.is_visible,
                       voice_id = excluded.voice_id,
-                      is_global = excluded.is_global
+                      is_global = excluded.is_global,
+                      created_at = COALESCE(personalities.created_at, excluded.created_at)
                     """,
                     (
                         str(p_id),
@@ -526,6 +573,7 @@ class DBService:
                         True,
                         str(voice_id),
                         True,
+                        time.time(),
                     ),
                 )
 
@@ -539,13 +587,13 @@ class DBService:
             default_user_id = str(uuid.uuid4())
 
             hobbies_csv = os.environ.get("ELATO_DEFAULT_USER_HOBBIES", "reading,lego,science")
-            default_hobbies = [h.strip() for h in hobbies_csv.split(",") if h.strip()]
+            default_hobbies = ", ".join([h.strip() for h in hobbies_csv.split(",") if h.strip()])
 
             default_user_name = "Elato"
             cursor.execute(
-                """INSERT INTO users (id, name, age, dob, hobbies, personality_type, likes, current_personality_id, user_type, device_volume)
+                """INSERT INTO users (id, name, age, dob, hobbies, about_you, personality_type, likes, current_personality_id, user_type)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (default_user_id, default_user_name, 11, None, json.dumps(default_hobbies), None, json.dumps([]), default_personality_id, "family", 70)
+                (default_user_id, default_user_name, 11, None, json.dumps([]), default_hobbies, None, json.dumps([]), default_personality_id, "family")
             )
 
         conn.commit()
@@ -573,10 +621,11 @@ class DBService:
             conn.close()
             return []
 
+        order = "ORDER BY CAST(COALESCE(created_at, 0) AS REAL) DESC, rowid DESC"
         if include_non_global:
-            cursor.execute("SELECT * FROM voices ORDER BY voice_name ASC")
+            cursor.execute(f"SELECT * FROM voices {order}")
         else:
-            cursor.execute("SELECT * FROM voices WHERE is_global = 1 ORDER BY voice_name ASC")
+            cursor.execute(f"SELECT * FROM voices WHERE is_global = 1 {order}")
 
         rows = cursor.fetchall()
         conn.close()
@@ -588,6 +637,7 @@ class DBService:
                 voice_description=row["voice_description"],
                 voice_src=row["voice_src"],
                 is_global=bool(row["is_global"]) if "is_global" in row.keys() else False,
+                created_at=row["created_at"] if "created_at" in row.keys() else None,
             )
             for row in rows
         ]
@@ -611,6 +661,7 @@ class DBService:
             voice_description=row["voice_description"],
             voice_src=row["voice_src"],
             is_global=bool(row["is_global"]) if "is_global" in row.keys() else False,
+            created_at=row["created_at"] if "created_at" in row.keys() else None,
         )
 
     def upsert_voice(
@@ -629,18 +680,20 @@ class DBService:
             conn.close()
             return None
 
+        created_at = time.time()
         cursor.execute(
             """
-            INSERT INTO voices (voice_id, gender, voice_name, voice_description, voice_src, is_global)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO voices (voice_id, gender, voice_name, voice_description, voice_src, is_global, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(voice_id) DO UPDATE SET
               gender = excluded.gender,
               voice_name = excluded.voice_name,
               voice_description = excluded.voice_description,
               voice_src = excluded.voice_src,
-              is_global = excluded.is_global
+              is_global = excluded.is_global,
+              created_at = COALESCE(voices.created_at, excluded.created_at)
             """,
-            (voice_id, gender, voice_name, voice_description, voice_src, bool(is_global)),
+            (voice_id, gender, voice_name, voice_description, voice_src, bool(is_global), created_at),
         )
         conn.commit()
         conn.close()
@@ -663,23 +716,25 @@ class DBService:
         conn = self._get_conn()
         cursor = conn.cursor()
 
+        created_at = time.time()
         cursor.execute(
-            "INSERT INTO personalities (id, name, prompt, short_description, tags, is_visible, voice_id, is_global) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (p_id, name, prompt, short_description, json.dumps(tags), is_visible, voice_id, is_global),
+            "INSERT INTO personalities (id, name, prompt, short_description, tags, is_visible, voice_id, is_global, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (p_id, name, prompt, short_description, json.dumps(tags), is_visible, voice_id, is_global, created_at),
         )
 
         conn.commit()
         conn.close()
-        return Personality(p_id, name, prompt, short_description, tags, is_visible, is_global, voice_id)
+        return Personality(p_id, name, prompt, short_description, tags, is_visible, is_global, voice_id, created_at)
 
     def get_personalities(self, include_hidden: bool = False) -> List[Personality]:
         conn = self._get_conn()
         cursor = conn.cursor()
 
+        order = "ORDER BY CAST(COALESCE(created_at, 0) AS REAL) DESC, rowid DESC"
         if include_hidden:
-            cursor.execute("SELECT * FROM personalities")
+            cursor.execute(f"SELECT * FROM personalities {order}")
         else:
-            cursor.execute("SELECT * FROM personalities WHERE is_visible = 1")
+            cursor.execute(f"SELECT * FROM personalities WHERE is_visible = 1 {order}")
 
         rows = cursor.fetchall()
         conn.close()
@@ -700,6 +755,7 @@ class DBService:
                     is_visible=bool(row["is_visible"]),
                     is_global=is_global,
                     voice_id=row["voice_id"],
+                    created_at=row["created_at"] if "created_at" in row.keys() else None,
                 )
             )
         return results
@@ -901,21 +957,28 @@ class DBService:
 
     # --- User CRUD ---
 
-    def create_user(self, name: str, age: Optional[int] = None, dob: Optional[str] = None, 
-                   hobbies: List[str] = [], personality_type: Optional[str] = None, 
-                   likes: List[str] = [], current_personality_id: Optional[str] = None,
-                   user_type: str = "family", device_volume: int = 70) -> User:
+    def create_user(
+        self,
+        name: str,
+        age: Optional[int] = None,
+        dob: Optional[str] = None,
+        about_you: str = "",
+        personality_type: Optional[str] = None,
+        likes: List[str] = [],
+        current_personality_id: Optional[str] = None,
+        user_type: str = "family",
+    ) -> User:
         u_id = str(uuid.uuid4())
         conn = self._get_conn()
         cursor = conn.cursor()
         cursor.execute(
-            """INSERT INTO users (id, name, age, dob, hobbies, personality_type, likes, current_personality_id, user_type, device_volume) 
+            """INSERT INTO users (id, name, age, dob, hobbies, about_you, personality_type, likes, current_personality_id, user_type) 
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (u_id, name, age, dob, json.dumps(hobbies), personality_type, json.dumps(likes), current_personality_id, user_type, device_volume)
+            (u_id, name, age, dob, json.dumps([]), about_you or "", personality_type, json.dumps(likes), current_personality_id, user_type)
         )
         conn.commit()
         conn.close()
-        return User(u_id, name, age, dob, hobbies, personality_type, likes, current_personality_id, user_type, device_volume)
+        return User(u_id, name, age, dob, about_you or "", personality_type, likes, current_personality_id, user_type)
 
     def get_users(self) -> List[User]:
         conn = self._get_conn()
@@ -930,12 +993,11 @@ class DBService:
                 name=row["name"],
                 age=row["age"],
                 dob=row["dob"],
-                hobbies=json.loads(row["hobbies"]) if row["hobbies"] else [],
+                about_you=(row["about_you"] if "about_you" in row.keys() and row["about_you"] is not None else ""),
                 personality_type=row["personality_type"],
                 likes=json.loads(row["likes"]) if row["likes"] else [],
                 current_personality_id=row["current_personality_id"],
                 user_type=row["user_type"] if "user_type" in row.keys() else "family",
-                device_volume=row["device_volume"] if "device_volume" in row.keys() else 70
             )
             for row in rows
         ]
@@ -953,12 +1015,11 @@ class DBService:
                 name=row["name"],
                 age=row["age"],
                 dob=row["dob"],
-                hobbies=json.loads(row["hobbies"]) if row["hobbies"] else [],
+                about_you=(row["about_you"] if "about_you" in row.keys() and row["about_you"] is not None else ""),
                 personality_type=row["personality_type"],
                 likes=json.loads(row["likes"]) if row["likes"] else [],
                 current_personality_id=row["current_personality_id"],
                 user_type=row["user_type"] if "user_type" in row.keys() else "family",
-                device_volume=row["device_volume"] if "device_volume" in row.keys() else 70
             )
         return None
 
@@ -979,9 +1040,9 @@ class DBService:
         if "dob" in kwargs:
             fields.append("dob = ?")
             values.append(kwargs["dob"])
-        if "hobbies" in kwargs:
-            fields.append("hobbies = ?")
-            values.append(json.dumps(kwargs["hobbies"]))
+        if "about_you" in kwargs:
+            fields.append("about_you = ?")
+            values.append(kwargs["about_you"] or "")
         if "personality_type" in kwargs:
             fields.append("personality_type = ?")
             values.append(kwargs["personality_type"])
@@ -994,9 +1055,6 @@ class DBService:
         if "user_type" in kwargs:
             fields.append("user_type = ?")
             values.append(kwargs["user_type"])
-        if "device_volume" in kwargs:
-            fields.append("device_volume = ?")
-            values.append(kwargs["device_volume"])
             
         if not fields:
             return current

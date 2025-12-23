@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { api } from '../api';
-import { Pencil, User, Volume2 } from 'lucide-react';
+import { Pencil, User } from 'lucide-react';
 import { AddUserModal } from '../components/AddUserModal';
 import { EditUserModal } from '../components/EditUserModal';
 import { useActiveUser } from '../state/ActiveUserContext';
@@ -112,29 +112,16 @@ export const UsersPage = () => {
                 </h3>
                 <div className="flex gap-4 text-sm text-gray-600 mt-1">
                   <span>Age: {u.age || 'N/A'}</span>
-                  <span>•</span>
-                  <span className="flex items-center gap-1">
-                    <Volume2 size={14} />
-                    {(typeof u.device_volume === 'number' ? u.device_volume : 70)}%
-                  </span>
                 </div>
               </div>
             </div>
             
             <div className="flex flex-col items-end gap-2 pr-8 w-full sm:w-[320px] sm:max-w-[45%]">
               <div className="text-xs font-bold uppercase tracking-wider text-gray-500">
-                Interests
+                About you
               </div>
-              <div className="flex flex-wrap justify-end gap-1">
-                {(Array.isArray(u.hobbies) ? u.hobbies : []).slice(0, 6).map((hobby: string, idx: number) => (
-                  <span
-                    key={`${u.id}-${idx}`}
-                    title={hobby}
-                    className="px-2 py-1 bg-[#fff3b0] border border-black text-xs font-bold max-w-full sm:max-w-[220px] truncate"
-                  >
-                    {hobby}
-                  </span>
-                ))}
+              <div className="font-mono text-xs text-gray-700 text-right whitespace-pre-wrap break-words">
+                {u.about_you ? String(u.about_you) : '—'}
               </div>
             </div>
           </div>

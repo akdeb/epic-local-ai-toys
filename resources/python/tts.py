@@ -39,8 +39,19 @@ class ChatterboxTTS:
         if self.ref_audio_path:
             self.model.prepare_conditionals(self.ref_audio_path)
 
-    def generate(self, text: str) -> Generator[bytes, None, None]:
+    def prepare_ref_audio(self, ref_audio_path: Optional[str]) -> None:
+        if not self.model:
+            raise RuntimeError("TTS model not loaded")
+        if ref_audio_path:
+            self.model.prepare_conditionals(ref_audio_path)
+            self.ref_audio_path = ref_audio_path
+        else:
+            self.ref_audio_path = None
+
+    def generate(self, text: str, ref_audio_path: Optional[str] = None) -> Generator[bytes, None, None]:
         """Generate audio chunks for the given text."""
+        if ref_audio_path is not None and ref_audio_path != self.ref_audio_path:
+            self.prepare_ref_audio(ref_audio_path)
         for chunk in self.model.generate(
             text,
             ref_audio=None,  # Already prepared via prepare_conditionals

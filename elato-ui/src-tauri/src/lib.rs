@@ -211,6 +211,19 @@ async fn download_voice(app: AppHandle, voice_id: String) -> Result<String, Stri
 }
 
 #[tauri::command]
+fn save_voice_wav_base64(app: AppHandle, voice_id: String, base64_wav: String) -> Result<String, String> {
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(base64_wav)
+        .map_err(|e| format!("Failed to decode base64 wav: {}", e))?;
+
+    let dir = get_voices_dir(&app);
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let path = dir.join(format!("{}.wav", voice_id));
+    fs::write(&path, &bytes).map_err(|e| e.to_string())?;
+    Ok(path.to_string_lossy().to_string())
+}
+
+#[tauri::command]
 fn read_voice_base64(app: AppHandle, voice_id: String) -> Result<Option<String>, String> {
     let path = get_voices_dir(&app).join(format!("{}.wav", voice_id));
     if !path.exists() {
@@ -594,6 +607,7 @@ pub fn run() {
             println!("[TAURI] Server dir: {:?}", python_dir);
 
             let elato_db_path = get_elato_dir(&app.handle()).join("elato.db");
+            let elato_voices_dir = get_voices_dir(&app.handle());
             println!("[TAURI] DB Path: {:?}", elato_db_path);
 
             // Spawn the Python server with inherited stdio so we can see output
@@ -607,6 +621,8 @@ pub fn run() {
                 .arg("8000")
                 .current_dir(&python_dir)
                 .env("ELATO_DB_PATH", elato_db_path.to_string_lossy().to_string())
+                .env("ELATO_VOICES_DIR", elato_voices_dir.to_string_lossy().to_string())
+                .env("TOKENIZERS_PARALLELISM", "false")
                 .stdout(Stdio::inherit())
                 .stderr(Stdio::inherit())
                 .spawn();
@@ -626,6 +642,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             greet,
             download_voice,
+            save_voice_wav_base64,
             read_voice_base64,
             list_downloaded_voices,
             get_voice_path,

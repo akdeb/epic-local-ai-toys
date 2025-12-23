@@ -4,18 +4,23 @@ import { useActiveUser } from '../state/ActiveUserContext';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../api';
 import { useEffect, useState } from 'react';
-import { Bot, ShieldCheck } from 'lucide-react';
+import { Bot, ShieldCheck, Sparkles, X } from 'lucide-react';
+import { VoiceWsProvider, useVoiceWs } from '../state/VoiceWsContext';
 
-export const Layout = () => {
+const LayoutInner = () => {
   const { activeUser } = useActiveUser();
   const navigate = useNavigate();
+  const voiceWs = useVoiceWs();
   const [activePersonalityName, setActivePersonalityName] = useState<string | null>(null);
   const [deviceConnected, setDeviceConnected] = useState<boolean>(false);
   const [deviceSessionId, setDeviceSessionId] = useState<string | null>(null);
 
-  const statusLabel = deviceConnected ? 'Chat in progress' : 'Ready to connect';
-  const statusDotClass = deviceConnected ? 'bg-[#00c853]' : 'bg-[#ffd400]';
-  const statusTextClass = deviceConnected ? 'text-green-800' : 'text-yellow-900';
+  const sessionActive = deviceConnected || voiceWs.isActive;
+
+  const statusLabel = sessionActive ? 'Chat in progress' : 'Ready to connect';
+  const statusDotClass = sessionActive ? 'bg-[#00c853]' : 'bg-[#ffd400]';
+  const statusTextClass = sessionActive ? 'text-green-800' : 'text-yellow-900';
+  const borderClass = sessionActive ? 'border-[var(--color-retro-green)]' : 'border-[var(--color-retro-yellow)]';
 
   useEffect(() => {
     let cancelled = false;
@@ -58,7 +63,7 @@ export const Layout = () => {
         {activeUser?.current_personality_id && (
           <div className="fixed bottom-0 left-64 right-0 pointer-events-none">
             <div className="max-w-4xl mx-auto px-8 pb-6 pointer-events-auto">
-              <div className="bg-white border-3 border-[var(--color-retro-yellow)] rounded-full px-5 py-4 flex items-center justify-between shadow-[0_10px_24px_rgba(0,0,0,0.14)]">
+              <div className={`bg-white border-3 ${borderClass} rounded-full px-5 py-4 flex items-center justify-between shadow-[0_10px_24px_rgba(0,0,0,0.14)]`}>
                 <div className="min-w-0">
                   <div className="flex items-center flex-row gap-3">
                     <div className="font-mono text-xs text-gray-500">Active</div>
@@ -67,7 +72,7 @@ export const Layout = () => {
                   <div className="mt-0.5 flex items-center gap-3 min-w-0">
                     <div className="font-black text-base text-black truncate">{activePersonalityName || '—'}</div>
                     <div className="inline-flex items-center gap-2 font-mono text-[11px] shrink-0">
-                      <span className={`w-2 h-2 rounded-full border border-black ${statusDotClass}`} />
+                      <span className={`w-2 h-2 rounded-full border border-black ${statusDotClass} ${sessionActive ? 'retro-blink' : ''}`} />
                       <span className={statusTextClass}>{statusLabel}</span>
                     </div>
                   </div>
@@ -76,11 +81,36 @@ export const Layout = () => {
                 <div className="flex items-center gap-3">
                   <button
                     type="button"
-                    className="retro-btn bg-white px-4 py-2 text-sm flex items-center gap-2"
-                    onClick={() => navigate('/test')}
+                    className={`retro-btn  ${sessionActive ? 'retro-btn-green' : '' } px-4 py-2 text-sm flex items-center gap-2`}
+                    onClick={() => {
+                      navigate('/test');
+                      if (!sessionActive) {
+                        voiceWs.connect();
+                      }
+                    }}
                   >
-                  <Bot size={18} className="flex-shrink-0" />  Test
+                  {sessionActive ? <Sparkles fill='currentColor' size={18} className="flex-shrink-0" /> : <Bot size={18} className="flex-shrink-0" />}
+                  {sessionActive ? 'View' : 'Test'}
                   </button>
+
+                  {sessionActive && (
+                    <button
+                      type="button"
+                      className="retro-btn retro-btn-outline px-4 py-2 text-sm flex items-center gap-2 disabled:opacity-60"
+                      onClick={() => {
+                        voiceWs.disconnect();
+                        const sid = voiceWs.latestSessionId;
+                        if (sid) {
+                          navigate(`/conversations?session=${encodeURIComponent(sid)}`);
+                        } else {
+                          navigate('/conversations');
+                        }
+                      }}
+                      disabled={!sessionActive}
+                    >
+                      <X size={18} className="flex-shrink-0" /> End
+                    </button>
+                  )}
                   {deviceConnected && deviceSessionId && (
                     <button
                       type="button"
@@ -97,5 +127,13 @@ export const Layout = () => {
         )}
       </main>
     </div>
+  );
+};
+
+export const Layout = () => {
+  return (
+    <VoiceWsProvider>
+      <LayoutInner />
+    </VoiceWsProvider>
   );
 };

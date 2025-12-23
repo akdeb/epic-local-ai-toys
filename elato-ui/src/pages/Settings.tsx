@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { api } from '../api';
-import { Save, RefreshCw, Brain, Wifi, Radio, MonitorUp } from 'lucide-react';
+import { RefreshCw, Brain, Radio, MonitorUp, Rss, Zap } from 'lucide-react';
 
 type ModelConfig = {
   llm: {
@@ -11,18 +11,8 @@ type ModelConfig = {
   };
 };
 
-type DeviceStatus = {
-  mac_address: string | null;
-  volume: number | null;
-  flashed: boolean | null;
-  ws_status: string | null;
-  ws_last_seen: number | null;
-  firmware_version: string | null;
-};
-
 export const Settings = () => {
   const [models, setModels] = useState<ModelConfig | null>(null);
-  const [device, setDevice] = useState<DeviceStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [llmRepo, setLlmRepo] = useState('');
   const [saving, setSaving] = useState(false);
@@ -31,6 +21,7 @@ export const Settings = () => {
   const [selectedPort, setSelectedPort] = useState<string>('');
   const [flashing, setFlashing] = useState(false);
   const [flashLog, setFlashLog] = useState<string>('');
+  const [laptopVolume, setLaptopVolume] = useState<number>(70);
 
   const isLikelyDevicePort = (port: string) => /\/dev\/(cu|tty)\.(usbserial|usbmodem)/i.test(port);
 
@@ -44,9 +35,7 @@ export const Settings = () => {
 
   useEffect(() => {
     loadSettings();
-    // Poll device status every 5 seconds
-    const interval = setInterval(loadDeviceStatus, 5000);
-    return () => clearInterval(interval);
+    return () => {};
   }, []);
 
   useEffect(() => {
@@ -89,27 +78,20 @@ export const Settings = () => {
     setLoading(true);
     setError(null);
     try {
-      const [modelData, deviceData] = await Promise.all([
+      const [modelData, volSetting] = await Promise.all([
         api.getModels(),
-        api.getDeviceStatus()
+        api.getSetting('laptop_volume').catch(() => ({ key: 'laptop_volume', value: '70' })),
       ]);
       setModels(modelData);
-      setDevice(deviceData);
       setLlmRepo(modelData.llm.repo);
+      const raw = (volSetting as any)?.value;
+      const parsed = raw != null ? Number(raw) : 70;
+      setLaptopVolume(Number.isFinite(parsed) ? Math.max(0, Math.min(100, parsed)) : 70);
     } catch (e) {
       console.error('Failed to load settings:', e);
       setError('Failed to load settings.');
     } finally {
       setLoading(false);
-    }
-  };
-
-  const loadDeviceStatus = async () => {
-    try {
-      const data = await api.getDeviceStatus();
-      setDevice(data);
-    } catch {
-      // Ignore polling errors
     }
   };
 
@@ -167,7 +149,7 @@ export const Settings = () => {
                 disabled={saving || loading || llmRepo === models?.llm.repo}
                 className="retro-btn bg-[#9b5cff] text-white disabled:opacity-50 flex items-center gap-2"
               >
-                {saving ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+                {saving ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Rss className="w-4 h-4" />}
                 {saving ? 'Saving...' : 'Update'}
               </button>
             </div>
@@ -196,11 +178,11 @@ export const Settings = () => {
             
                           <button
                 type="button"
-                className="retro-btn bg-[#9b5cff] text-white disabled:opacity-50"
+                className="retro-btn bg-[#9b5cff] text-white disabled:opacity-50 flex items-center gap-2"
                 onClick={flashFirmware}
                 disabled={!flashEnabled}
               >
-                {flashing ? 'Flashing…' : 'Flash'}
+                <Zap size={16} />{flashing ? 'Flashing…' : 'Flash'}
               </button>
           </div>
           <div className="mt-5">
@@ -271,29 +253,27 @@ export const Settings = () => {
               </div>
             </div>
           </div> */}
-                       {/* Volume Slider */}
-             <div className="py-4">
-              <div className="text-xs text-gray-500 uppercase mb-2">Device Volume</div>
-              <div className="flex items-center gap-4">
-                <input 
-                  type="range" 
-                  min="0" 
-                  max="100" 
-                  value={device?.volume ?? 50} 
-                  onChange={(e) => {
-                    const vol = Number(e.target.value);
-                    setDevice(prev => prev ? { ...prev, volume: vol } : null);
-                    // Debounce/commit? For now direct update
-                    api.updateDevice({ volume: vol }).catch(console.error);
-                  }}
-                  className="retro-range w-full h-2 bg-white rounded-lg appearance-none cursor-pointer"
-                  style={{
-                    background: `linear-gradient(#9b5cff 0 0) 0/${Math.max(0, Math.min(100, device?.volume ?? 50))}% 100% no-repeat, white`,
-                  }}
-                />
-                <span className="font-black w-12 text-right">{device?.volume ?? '50'}%</span>
-              </div>
+          <div className="py-4">
+            <div className="text-xs text-gray-500 uppercase mb-2">Laptop Volume</div>
+            <div className="flex items-center gap-4">
+              <input
+                type="range"
+                min="0"
+                max="100"
+                value={laptopVolume}
+                onChange={(e) => {
+                  const vol = Math.max(0, Math.min(100, Number(e.target.value)));
+                  setLaptopVolume(vol);
+                  api.setSetting('laptop_volume', String(vol)).catch(console.error);
+                }}
+                className="retro-range w-full h-2 bg-white rounded-lg appearance-none cursor-pointer"
+                style={{
+                  background: `linear-gradient(#9b5cff 0 0) 0/${Math.max(0, Math.min(100, laptopVolume))}% 100% no-repeat, white`,
+                }}
+              />
+              <span className="font-black w-12 text-right">{laptopVolume}%</span>
             </div>
+          </div>
         </div>
 
 

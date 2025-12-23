@@ -6,12 +6,11 @@ type User = {
   name: string;
   age?: number | null;
   dob?: string | null;
-  hobbies: string[];
+  about_you?: string | null;
   personality_type?: string | null;
   likes: string[];
   current_personality_id?: string | null;
   user_type?: string | null;
-  device_volume?: number | null;
 };
 
 type ActiveUserContextValue = {

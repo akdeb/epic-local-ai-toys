@@ -8,6 +8,7 @@
   --color-retro-card: #ffffff;
   --color-retro-yellow: #ffd400;
   --color-retro-green: #00c853;
+  --color-retro-green-hover: #00b448;
   --radius-retro: 24px;
   --radius-retro-sm: 18px;
   
@@ -24,6 +25,19 @@
 }
 
 @layer utilities {
+  @keyframes retro-blink {
+    0%, 100% {
+      opacity: 1;
+    }
+    50% {
+      opacity: 0.55;
+    }
+  }
+
+  .retro-blink {
+    animation: retro-blink 1.8s ease-in-out infinite;
+  }
+
   .retro-shadow {
     box-shadow: var(--shadow-retro);
     border: 1px solid #000000;
@@ -74,12 +88,30 @@
 
   .retro-btn-green {
     background-color: var(--color-retro-green);
-    color: #111827;
+    border-color: var(--color-retro-green-hover);
+    box-shadow: 0 2px 0 var(--color-retro-green-hover);
+    color: white;
   }
 
   .retro-btn-outline {
     background-color: transparent;
   }
+
+  .retro-btn-dangerous-outline {
+    background-color: transparent;
+    border-color: #dc2626;
+    color: #dc2626;
+    box-shadow: 0 2px 0 #dc2626;
+  }
+
+  .retro-btn-dangerous-outline:hover {
+    background-color: rgba(220, 38, 38, 0.08);
+  }
+
+  .retro-btn-dangerous-outline:active {
+    background-color: rgba(220, 38, 38, 0.14);
+  }
+
   .retro-btn:active {
     transform: translateY(1px);
     box-shadow: 0 1px 0 rgba(0, 0, 0, 0.65);

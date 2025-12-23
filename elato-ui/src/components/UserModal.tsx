@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { api } from "../api";
 import { Modal } from "./Modal";
 
@@ -6,9 +6,8 @@ export type UserForModal = {
   id: string;
   name: string;
   age?: number | null;
-  hobbies: string[];
+  about_you?: string | null;
   user_type?: string | null;
-  device_volume?: number | null;
 };
 
 type UserModalProps = {
@@ -22,25 +21,16 @@ type UserModalProps = {
 export function UserModal({ open, mode, user, onClose, onSuccess }: UserModalProps) {
   const [name, setName] = useState("");
   const [age, setAge] = useState<string>("");
-  const [hobbies, setHobbies] = useState("");
+  const [aboutYou, setAboutYou] = useState("");
   const [userType, setUserType] = useState("family");
-  const [deviceVolume, setDeviceVolume] = useState<string>("70");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-
-  const parsedHobbies = useMemo(() => {
-    return hobbies
-      .split(",")
-      .map((s) => s.trim())
-      .filter(Boolean);
-  }, [hobbies]);
 
   const reset = () => {
     setName("");
     setAge("");
-    setHobbies("");
+    setAboutYou("");
     setUserType("family");
-    setDeviceVolume("70");
     setError(null);
   };
 
@@ -54,9 +44,8 @@ export function UserModal({ open, mode, user, onClose, onSuccess }: UserModalPro
       }
       setName(user.name || "");
       setAge(user.age != null ? String(user.age) : "");
-      setHobbies((user.hobbies || []).join(", "));
+      setAboutYou((user.about_you || "") as string);
       setUserType(user.user_type || "family");
-      setDeviceVolume(user.device_volume != null ? String(user.device_volume) : "70");
       setError(null);
     } else {
       reset();
@@ -80,17 +69,15 @@ export function UserModal({ open, mode, user, onClose, onSuccess }: UserModalPro
         await api.createUser({
           name: name.trim(),
           age: age ? Number(age) : null,
-          hobbies: parsedHobbies,
+          about_you: aboutYou,
           user_type: userType,
-          device_volume: deviceVolume ? Number(deviceVolume) : 70,
         });
       } else {
         await api.updateUser(user!.id, {
           name: name.trim(),
           age: age ? Number(age) : null,
-          hobbies: parsedHobbies,
+          about_you: aboutYou,
           user_type: userType,
-          device_volume: deviceVolume ? Number(deviceVolume) : 70,
         });
       }
 
@@ -149,12 +136,13 @@ export function UserModal({ open, mode, user, onClose, onSuccess }: UserModalPro
         </div>
 
         <div>
-          <label className="block font-bold mb-2 uppercase text-sm">Hobbies</label>
-          <input
+          <label className="block font-bold mb-2 uppercase text-sm">About you</label>
+          <textarea
             className="retro-input"
-            value={hobbies}
-            onChange={(e) => setHobbies(e.target.value)}
-            placeholder={mode === "create" ? "drawing, lego, dinosaurs" : undefined}
+            rows={3}
+            value={aboutYou}
+            onChange={(e) => setAboutYou(e.target.value)}
+            placeholder={mode === "create" ? "A short note about you" : undefined}
           />
         </div>
 

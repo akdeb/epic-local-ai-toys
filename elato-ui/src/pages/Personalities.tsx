@@ -1,10 +1,12 @@
 import { useEffect, useMemo, useState, type MouseEvent } from 'react';
 import { api } from '../api';
-import { Download, Loader2, Pencil, Play, Trash2 } from 'lucide-react';
+import { Pencil, Trash2 } from 'lucide-react';
 import { useActiveUser } from '../state/ActiveUserContext';
 import { PersonalityModal, PersonalityForModal } from '../components/PersonalityModal';
 import { Link } from 'react-router-dom';
 import { invoke } from '@tauri-apps/api/core';
+import { VoiceActionButtons } from '../components/VoiceActionButtons';
+import { useVoicePlayback } from '../hooks/useVoicePlayback';
 
 export const Personalities = () => {
   const [personalities, setPersonalities] = useState<any[]>([]);
@@ -14,6 +16,17 @@ export const Personalities = () => {
   const [downloadedVoiceIds, setDownloadedVoiceIds] = useState<Set<string>>(new Set());
   const [downloadingVoiceId, setDownloadingVoiceId] = useState<string | null>(null);
   const [audioSrcByVoiceId, setAudioSrcByVoiceId] = useState<Record<string, string>>({});
+
+  const { playingVoiceId, isPaused, toggle: toggleVoice } = useVoicePlayback(async (voiceId) => {
+    let src = audioSrcByVoiceId[voiceId];
+    if (!src) {
+      const b64 = await invoke<string | null>('read_voice_base64', { voiceId });
+      if (!b64) return null;
+      src = `data:audio/wav;base64,${b64}`;
+      setAudioSrcByVoiceId((prev) => ({ ...prev, [voiceId]: src! }));
+    }
+    return src;
+  });
   
   // Modal state
   const [modalOpen, setModalOpen] = useState(false);
@@ -21,6 +34,18 @@ export const Personalities = () => {
   const [selectedPersonality, setSelectedPersonality] = useState<PersonalityForModal | null>(null);
 
   const { activeUserId, activeUser, refreshUsers } = useActiveUser();
+
+  const toTimestamp = (v: any) => {
+    if (v == null) return 0;
+    if (typeof v === 'number') return Number.isFinite(v) ? v : 0;
+    if (typeof v === 'string') {
+      const asNum = Number(v);
+      if (Number.isFinite(asNum)) return asNum;
+      const ms = Date.parse(v);
+      if (Number.isFinite(ms)) return Math.floor(ms / 1000);
+    }
+    return 0;
+  };
 
   const load = async () => {
     try {
@@ -33,6 +58,17 @@ export const Personalities = () => {
       setLoading(false);
     }
   };
+
+  const sortedPersonalities = useMemo(() => {
+    const arr = Array.isArray(personalities) ? personalities.slice() : [];
+    arr.sort((a, b) => {
+      const aT = toTimestamp(a?.created_at);
+      const bT = toTimestamp(b?.created_at);
+      if (aT !== bT) return bT - aT;
+      return 0;
+    });
+    return arr;
+  }, [personalities]);
 
   useEffect(() => {
     load();
@@ -96,20 +132,12 @@ export const Personalities = () => {
     }
   };
 
-  const playVoice = async (voiceId: string) => {
+  const togglePlay = async (voiceId: string) => {
     if (!downloadedVoiceIds.has(voiceId)) return;
     try {
-      let src = audioSrcByVoiceId[voiceId];
-      if (!src) {
-        const b64 = await invoke<string | null>('read_voice_base64', { voiceId });
-        if (!b64) return;
-        src = `data:audio/wav;base64,${b64}`;
-        setAudioSrcByVoiceId((prev) => ({ ...prev, [voiceId]: src! }));
-      }
-      const audio = new Audio(src);
-      await audio.play();
+      await toggleVoice(voiceId);
     } catch (e) {
-      console.error('playVoice failed', e);
+      console.error('toggleVoice failed', e);
     }
   };
 
@@ -192,7 +220,7 @@ export const Personalities = () => {
       )}
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-        {personalities.map((p) => (
+        {sortedPersonalities.map((p) => (
           <div
             key={p.id}
             role="button"
@@ -201,7 +229,7 @@ export const Personalities = () => {
             onKeyDown={(e) => {
               if (e.key === 'Enter' || e.key === ' ') assignToActiveUser(p.id);
             }}
-            className={`retro-card relative group text-left cursor-pointer transition-shadow ${activeUser?.current_personality_id === p.id ? 'retro-selected' : 'retro-not-selected'}`}
+            className={`retro-card relative group text-left cursor-pointer transition-shadow flex flex-col ${activeUser?.current_personality_id === p.id ? 'retro-selected' : 'retro-not-selected'}`}
           >
             <div className="absolute top-4 right-4 flex items-center gap-2">
               {!p.is_global && (
@@ -233,10 +261,10 @@ export const Personalities = () => {
               "{p.short_description}"
             </p>
 
-            <div className="mt-4 border-t-2 border-black pt-3 hover:scale-103 transition-transform">
+            <div className="mt-auto border-t-2 border-black pt-3 hover:scale-103 transition-transform">
               <div className="flex items-center justify-between gap-3">
                 <div className="min-w-0 flex-1">
-                  <div className="text-xs font-bold uppercase">Voice used</div>
+                  <div className="text-xs font-bold uppercase">Voice</div>
                   <Link
                     to={`/voices?voice_id=${encodeURIComponent(p.voice_id)}`}
                     onClick={(e) => e.stopPropagation()}
@@ -248,40 +276,16 @@ export const Personalities = () => {
                 </div>
 
                 <div className="shrink-0">
-                  {downloadedVoiceIds.has(p.voice_id) ? (
-                    <button
-                      type="button"
-                      className="retro-btn retro-btn-outline"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        playVoice(p.voice_id);
-                      }}
-                      title={`Play ${p.voice_id}.wav`}
-                    >
-                      <span className="inline-flex items-center gap-2">
-                        <Play fill="currentColor" size={16} />
-                      </span>
-                    </button>
-                  ) : (
-                    <button
-                      type="button"
-                      className="retro-btn retro-btn-outline"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        downloadVoice(p.voice_id);
-                      }}
-                      disabled={downloadingVoiceId === p.voice_id}
-                      title={`Download ${p.voice_id}.wav`}
-                    >
-                      <span className="inline-flex items-center gap-2">
-                        {downloadingVoiceId === p.voice_id ? (
-                          <Loader2 size={16} className="animate-spin" />
-                        ) : (
-                          <Download size={16} />
-                        )}
-                      </span>
-                    </button>
-                  )}
+                  <VoiceActionButtons
+                    voiceId={String(p.voice_id)}
+                    isDownloaded={downloadedVoiceIds.has(String(p.voice_id))}
+                    downloadingVoiceId={downloadingVoiceId}
+                    onDownload={(id) => downloadVoice(id)}
+                    onTogglePlay={(id) => togglePlay(id)}
+                    isPlaying={playingVoiceId === String(p.voice_id)}
+                    isPaused={isPaused}
+                    stopPropagation
+                  />
                 </div>
               </div>
             </div>

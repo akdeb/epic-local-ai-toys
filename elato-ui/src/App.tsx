@@ -18,6 +18,7 @@ function SetupGate() {
   const [checking, setChecking] = useState(true);
   const [needsSetup, setNeedsSetup] = useState(false);
   const [backendReady, setBackendReady] = useState(false);
+  const [startupMsg, setStartupMsg] = useState<string>("Starting backend...");
 
   useEffect(() => {
     let cancelled = false;
@@ -34,17 +35,29 @@ function SetupGate() {
     };
     checkFirstLaunch();
 
-    // If setup is complete, wait until the Python API server is reachable.
-    // This restores the previous "Starting AI engine" loading state.
+    // If setup is complete, wait until DB seeding + model pipeline init are complete.
     const waitForBackend = async () => {
       while (!cancelled) {
         try {
-          await api.health();
-          if (!cancelled) setBackendReady(true);
-          return;
+          const st = await api.startupStatus();
+          if (!cancelled) {
+            const counts = st?.counts || {};
+            if (!st?.seeded) {
+              setStartupMsg(`Seeding database... (voices: ${counts.voices ?? 0}, personalities: ${counts.personalities ?? 0})`);
+            } else if (!st?.pipeline_ready) {
+              setStartupMsg("Starting AI engine...");
+            } else {
+              setStartupMsg("Ready");
+            }
+          }
+          if (st?.ready) {
+            if (!cancelled) setBackendReady(true);
+            return;
+          }
         } catch {
-          await new Promise((r) => setTimeout(r, 500));
+          if (!cancelled) setStartupMsg("Starting backend...");
         }
+        await new Promise((r) => setTimeout(r, 500));
       }
     };
     waitForBackend();
@@ -74,7 +87,7 @@ function SetupGate() {
       <div className="min-h-screen bg-[var(--color-retro-bg)] retro-dots flex items-center justify-center">
         <div className="text-center retro-card">
           <div className="text-2xl font-black mb-2 tracking-wider brand-font">ELATO</div>
-          <div className="text-gray-500 font-mono">Starting AI engine...</div>
+          <div className="text-gray-500 font-mono">{startupMsg}</div>
         </div>
       </div>
     );

@@ -34,6 +34,21 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def _resolve_voice_ref_audio_path(voice_id: Optional[str]) -> Optional[str]:
+    if not voice_id:
+        return None
+    voices_dir = os.environ.get("ELATO_VOICES_DIR")
+    if not voices_dir:
+        return None
+    try:
+        path = Path(voices_dir).joinpath(f"{voice_id}.wav")
+        if path.exists() and path.is_file():
+            return str(path)
+    except Exception:
+        return None
+    return None
+
+
 class VoicePipeline:
     def __init__(
         self,
@@ -159,7 +174,12 @@ class VoicePipeline:
             )
         return response.strip()
 
-    async def synthesize_speech(self, text: str, cancel_event: asyncio.Event = None):
+    async def synthesize_speech(
+        self,
+        text: str,
+        cancel_event: asyncio.Event = None,
+        ref_audio_path: Optional[str] = None,
+    ):
         """
         Generator that yields audio chunks (as int16 PCM bytes) for the given text.
         Can be cancelled by setting cancel_event.
@@ -169,7 +189,7 @@ class VoicePipeline:
 
         def _tts_stream():
             # TTS wrapper already returns int16 PCM bytes
-            for audio_bytes in self.tts.generate(text):
+            for audio_bytes in self.tts.generate(text, ref_audio_path=ref_audio_path):
                 if cancel_event and cancel_event.is_set():
                     break
                 loop.call_soon_threadsafe(audio_queue.put_nowait, audio_bytes)
@@ -215,6 +235,7 @@ manager = ConnectionManager()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global pipeline
+    app.state.pipeline_ready = False
     
     # Initialize database (already handled by module import, but logging for clarity)
     logger.info("Database service active")
@@ -247,6 +268,7 @@ async def lifespan(app: FastAPI):
     )
     await pipeline.init_models()
     logger.info("Voice pipeline initialized")
+    app.state.pipeline_ready = True
     yield
     logger.info("Shutting down...")
 
@@ -272,6 +294,20 @@ class SettingUpdate(BaseModel):
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+@app.get("/startup-status")
+async def startup_status():
+    voices_n = db_service.db_service.get_table_count("voices")
+    personalities_n = db_service.db_service.get_table_count("personalities")
+    seeded = bool(getattr(db_service.db_service, "seeded_ok", False)) and voices_n > 0 and personalities_n > 0
+    pipeline_ready = bool(getattr(app.state, "pipeline_ready", False))
+    return {
+        "ready": bool(seeded and pipeline_ready),
+        "seeded": bool(seeded),
+        "pipeline_ready": bool(pipeline_ready),
+        "counts": {"voices": voices_n, "personalities": personalities_n},
+    }
 
 @app.get("/settings")
 async def get_all_settings():
@@ -456,6 +492,13 @@ async def websocket_esp32(websocket: WebSocket):
         u = db_service.db_service.get_user(active_user_id)
         personality_id = u.current_personality_id if u else None
 
+    personality = None
+    if personality_id:
+        try:
+            personality = db_service.db_service.get_personality(personality_id)
+        except Exception:
+            personality = None
+
     def _build_llm_context(user_text: str) -> List[Dict[str, str]]:
         try:
             convos = db_service.db_service.get_conversations(session_id=session_id)
@@ -463,13 +506,6 @@ async def websocket_esp32(websocket: WebSocket):
             convos = []
 
         runtime = build_runtime_context()
-        personality = None
-        if personality_id:
-            try:
-                personality = db_service.db_service.get_personality(personality_id)
-            except Exception:
-                personality = None
-
         user_ctx = None
         try:
             u = db_service.db_service.get_user(active_user_id) if active_user_id else None
@@ -477,7 +513,7 @@ async def websocket_esp32(websocket: WebSocket):
                 user_ctx = {
                     "name": u.name,
                     "age": u.age,
-                    "hobbies": u.hobbies or [],
+                    "about_you": getattr(u, "about_you", "") or "",
                     "user_type": u.user_type,
                 }
         except Exception:
@@ -520,10 +556,12 @@ async def websocket_esp32(websocket: WebSocket):
     
     # Send auth to device
     volume = 70
-    if active_user_id:
-        u = db_service.db_service.get_user(active_user_id)
-        if u and u.device_volume is not None:
-            volume = u.device_volume
+    try:
+        raw = db_service.db_service.get_setting("laptop_volume")
+        if raw is not None:
+            volume = int(raw)
+    except Exception:
+        volume = 70
     
     try:
         await websocket.send_json({
@@ -552,7 +590,8 @@ async def websocket_esp32(websocket: WebSocket):
         except Exception:
             pass
 
-        async for audio_chunk in pipeline.synthesize_speech(greeting_text):
+        ref_audio_path = _resolve_voice_ref_audio_path(getattr(personality, "voice_id", None))
+        async for audio_chunk in pipeline.synthesize_speech(greeting_text, ref_audio_path=ref_audio_path):
             try:
                 await websocket.send_bytes(audio_chunk)
             except Exception:
@@ -658,7 +697,12 @@ async def websocket_esp32(websocket: WebSocket):
                                     break
                                 
                                 # Stream TTS audio
-                                async for audio_chunk in pipeline.synthesize_speech(full_response, cancel_event):
+                                ref_audio_path = _resolve_voice_ref_audio_path(getattr(personality, "voice_id", None))
+                                async for audio_chunk in pipeline.synthesize_speech(
+                                    full_response,
+                                    cancel_event,
+                                    ref_audio_path=ref_audio_path,
+                                ):
                                     if cancel_event.is_set():
                                         break
                                     try:
@@ -741,9 +785,39 @@ async def get_voices(include_non_global: bool = True):
             "voice_description": v.voice_description,
             "voice_src": v.voice_src,
             "is_global": v.is_global,
+            "created_at": getattr(v, "created_at", None),
         }
         for v in voices
     ]
+
+
+class VoiceCreate(BaseModel):
+    voice_id: str
+    voice_name: str
+    voice_description: Optional[str] = None
+
+
+@app.post("/voices")
+async def create_voice(body: VoiceCreate):
+    v = db_service.db_service.upsert_voice(
+        voice_id=body.voice_id,
+        voice_name=body.voice_name,
+        voice_description=body.voice_description,
+        gender=None,
+        voice_src=None,
+        is_global=False,
+    )
+    if not v:
+        raise HTTPException(status_code=500, detail="Failed to create voice")
+    return {
+        "voice_id": v.voice_id,
+        "gender": v.gender,
+        "voice_name": v.voice_name,
+        "voice_description": v.voice_description,
+        "voice_src": v.voice_src,
+        "is_global": v.is_global,
+        "created_at": getattr(v, "created_at", None),
+    }
 
 # --- Users CRUD ---
 
@@ -758,8 +832,7 @@ async def get_users():
             "age": u.age,
             "current_personality_id": u.current_personality_id,
             "user_type": u.user_type,
-            "hobbies": u.hobbies or [],
-            "device_volume": u.device_volume,
+            "about_you": getattr(u, "about_you", "") or "",
         }
         for u in users
     ]
@@ -767,11 +840,16 @@ async def get_users():
 class UserCreate(BaseModel):
     name: str
     age: Optional[int] = None
+    about_you: Optional[str] = ""
 
 @app.post("/users")
 async def create_user(body: UserCreate):
     """Create a new user."""
-    user = db_service.db_service.create_user(name=body.name, age=body.age)
+    user = db_service.db_service.create_user(
+        name=body.name,
+        age=body.age,
+        about_you=body.about_you or "",
+    )
     return {"id": user.id, "name": user.name}
 
 @app.put("/users/{user_id}")
@@ -798,6 +876,7 @@ async def get_personalities(include_hidden: bool = False):
             "is_visible": p.is_visible,
             "is_global": p.is_global,
             "voice_id": p.voice_id,
+            "created_at": getattr(p, "created_at", None),
         }
         for p in personalities
     ]
@@ -825,6 +904,7 @@ async def create_personality(body: PersonalityCreate):
 
 class GeneratePersonalityRequest(BaseModel):
     description: str
+    voice_id: Optional[str] = None
 
 @app.post("/personalities/generate")
 async def generate_personality(body: GeneratePersonalityRequest):
@@ -833,6 +913,7 @@ async def generate_personality(body: GeneratePersonalityRequest):
          raise HTTPException(status_code=503, detail="AI engine not ready")
     
     description = body.description
+    voice_id = body.voice_id or "radio"
     logger.info(f"Generating personality from description: {description}")
     
     # 1. Generate Name
@@ -858,7 +939,7 @@ async def generate_personality(body: GeneratePersonalityRequest):
         prompt=system_prompt,
         short_description=short_desc,
         tags=tags,
-        voice_id="radio",
+        voice_id=voice_id,
         is_global=False
     )
     
@@ -1048,7 +1129,7 @@ async def websocket_endpoint(websocket: WebSocket):
                                 user_ctx = {
                                     "name": u.name,
                                     "age": u.age,
-                                    "hobbies": u.hobbies or [],
+                                    "about_you": getattr(u, "about_you", "") or "",
                                     "user_type": u.user_type,
                                 }
                         except Exception:
@@ -1115,7 +1196,9 @@ async def websocket_endpoint(websocket: WebSocket):
                             started = False
 
                             async for audio_chunk in pipeline.synthesize_speech(
-                                full_response, cancel_event
+                                full_response,
+                                cancel_event,
+                                ref_audio_path=_resolve_voice_ref_audio_path(getattr(personality, "voice_id", None)),
                             ):
                                 if cancel_event.is_set() or not ws_open:
                                     break

@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { api } from "../api";
 import { Modal } from "./Modal";
-import { Brain, ArrowUp } from "lucide-react";
+import { ArrowUp } from "lucide-react";
 import logoPng from '../assets/logo.png';
 
 export type PersonalityForModal = {
@@ -17,11 +17,13 @@ type PersonalityModalProps = {
   open: boolean;
   mode: "create" | "edit";
   personality?: PersonalityForModal | null;
+  createVoiceId?: string | null;
+  createVoiceName?: string | null;
   onClose: () => void;
   onSuccess: () => Promise<void> | void;
 };
 
-export function PersonalityModal({ open, mode, personality, onClose, onSuccess }: PersonalityModalProps) {
+export function PersonalityModal({ open, mode, personality, createVoiceId, createVoiceName, onClose, onSuccess }: PersonalityModalProps) {
   // Create mode state
   const [description, setDescription] = useState("");
   
@@ -87,7 +89,11 @@ export function PersonalityModal({ open, mode, personality, onClose, onSuccess }
     setSubmitting(true);
     setError(null);
     try {
-      await api.generatePersonality(description.trim());
+      if (createVoiceId) {
+        await api.generatePersonalityWithVoice(description.trim(), createVoiceId);
+      } else {
+        await api.generatePersonality(description.trim());
+      }
       await onSuccess();
       reset();
       onClose();
@@ -151,6 +157,11 @@ export function PersonalityModal({ open, mode, personality, onClose, onSuccess }
                      <img src={logoPng} alt="" className="w-10 h-10" />
                 </div>
                 <h3 className="font-black text-2xl uppercase mt-2">Create Your Character</h3>
+                {createVoiceId && (
+                  <div className="font-mono text-xs text-gray-700">
+                    Create a Personality with {createVoiceName || createVoiceId}
+                  </div>
+                )}
             </div>
 
             <div className="relative w-full">

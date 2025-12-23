@@ -35,6 +35,10 @@ export const api = {
     return request(`/health`);
   },
 
+  startupStatus: async () => {
+    return request(`/startup-status`);
+  },
+
   getVoices: async () => {
     return request(`/voices`);
   },
@@ -84,6 +88,14 @@ export const api = {
     });
   },
 
+  generatePersonalityWithVoice: async (description: string, voice_id: string) => {
+    return request(`/personalities/generate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ description, voice_id }),
+    });
+  },
+
   updatePersonality: async (id: string, data: any) => {
     return request(`/personalities/${id}`, {
       method: "PUT",
@@ -95,6 +107,15 @@ export const api = {
   deletePersonality: async (id: string) => {
     return request(`/personalities/${id}`, {
       method: "DELETE",
+    });
+  },
+
+  // Voices
+  createVoice: async (data: { voice_id: string; voice_name: string; voice_description?: string | null }) => {
+    return request(`/voices`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(data),
     });
   },
 
@@ -159,6 +180,19 @@ export const api = {
 
   firmwarePorts: async () => {
     return request(`/firmware/ports`);
+  },
+
+  // Settings (app_state)
+  getSetting: async (key: string) => {
+    return request(`/settings/${encodeURIComponent(key)}`);
+  },
+
+  setSetting: async (key: string, value: string | null) => {
+    return request(`/settings/${encodeURIComponent(key)}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ value }),
+    });
   },
 
   flashFirmware: async (data: { port: string; baud?: number; chip?: string; offset?: string }) => {
