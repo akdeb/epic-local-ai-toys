@@ -30,7 +30,8 @@ export function PersonalityModal({ open, mode, personality, onClose, onSuccess }
   const [prompt, setPrompt] = useState("");
   const [shortDescription, setShortDescription] = useState("");
   const [tags, setTags] = useState("");
-  const [voiceId, setVoiceId] = useState("dave");
+  const [voiceId, setVoiceId] = useState("radio");
+  const [voices, setVoices] = useState<any[]>([]);
   
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -48,7 +49,7 @@ export function PersonalityModal({ open, mode, personality, onClose, onSuccess }
     setPrompt("");
     setShortDescription("");
     setTags("");
-    setVoiceId("dave");
+    setVoiceId("radio");
     setError(null);
   };
 
@@ -64,12 +65,32 @@ export function PersonalityModal({ open, mode, personality, onClose, onSuccess }
       setPrompt(personality.prompt || "");
       setShortDescription(personality.short_description || "");
       setTags((personality.tags || []).join(", "));
-      setVoiceId(personality.voice_id || "dave");
+      setVoiceId(personality.voice_id || "radio");
       setError(null);
     } else {
       reset();
     }
   }, [open, mode, personality?.id]);
+
+  useEffect(() => {
+    if (!open) return;
+    if (mode !== "edit") return;
+    let cancelled = false;
+
+    const loadVoices = async () => {
+      try {
+        const data = await api.getVoices();
+        if (!cancelled) setVoices(Array.isArray(data) ? data : []);
+      } catch {
+        if (!cancelled) setVoices([]);
+      }
+    };
+
+    loadVoices();
+    return () => {
+      cancelled = true;
+    };
+  }, [open, mode]);
 
   const submitCreate = async () => {
     if (!description.trim()) return;
@@ -218,10 +239,17 @@ export function PersonalityModal({ open, mode, personality, onClose, onSuccess }
         <div>
           <label className="block font-bold mb-2 uppercase text-sm">Voice ID</label>
           <select className="retro-input" value={voiceId} onChange={(e) => setVoiceId(e.target.value)}>
-            <option value="dave">Dave</option>
-            <option value="fin">Fin</option>
-            <option value="sandra">Sandra</option>
-            <option value="libby">Libby</option>
+            {!voices.some((v) => v?.voice_id === voiceId) && (
+              <option value={voiceId}>{voiceId}</option>
+            )}
+            {voices
+              .slice()
+              .sort((a, b) => String(a?.voice_name || a?.voice_id || "").localeCompare(String(b?.voice_name || b?.voice_id || "")))
+              .map((v) => (
+                <option key={v.voice_id} value={v.voice_id}>
+                  {v.voice_name || v.voice_id}
+                </option>
+              ))}
           </select>
         </div>
 

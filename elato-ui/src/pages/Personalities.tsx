@@ -1,11 +1,13 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { api } from '../api';
 import { Download, Eye, EyeOff, Pencil } from 'lucide-react';
 import { useActiveUser } from '../state/ActiveUserContext';
 import { PersonalityModal, PersonalityForModal } from '../components/PersonalityModal';
+import { Link } from 'react-router-dom';
 
 export const Personalities = () => {
   const [personalities, setPersonalities] = useState<any[]>([]);
+  const [voices, setVoices] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [showHidden, setShowHidden] = useState(false);
@@ -32,6 +34,30 @@ export const Personalities = () => {
   useEffect(() => {
     load();
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    const loadVoices = async () => {
+      try {
+        const data = await api.getVoices();
+        if (!cancelled) setVoices(Array.isArray(data) ? data : []);
+      } catch {
+        if (!cancelled) setVoices([]);
+      }
+    };
+    loadVoices();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const voiceById = useMemo(() => {
+    const m = new Map<string, any>();
+    for (const v of voices) {
+      if (v?.voice_id) m.set(String(v.voice_id), v);
+    }
+    return m;
+  }, [voices]);
 
   const visible = personalities.filter((p) => p.is_visible);
   const hidden = personalities.filter((p) => !p.is_visible);
@@ -165,6 +191,16 @@ export const Personalities = () => {
             <p className="text-gray-600 mb-4 text-sm font-medium border-l-4 border-gray-300 pl-2">
               "{p.short_description}"
             </p>
+            <div className="mb-4">
+              <Link
+                to={`/voices?voice_id=${encodeURIComponent(p.voice_id)}`}
+                onClick={(e) => e.stopPropagation()}
+                className="inline-block px-2 py-1 border border-black text-xs font-bold lowercase"
+                title="View voice"
+              >
+                {voiceById.get(p.voice_id)?.voice_name || p.voice_id}
+              </Link>
+            </div>
             <div className="flex flex-wrap gap-2">
               {p.tags.map((tag: string) => (
                 <span key={tag} className="px-2 py-1 border border-black text-xs font-bold lowercase">
@@ -207,14 +243,20 @@ export const Personalities = () => {
                   >
                     <Eye size={16} />
                   </button>
-                  <div className="bg-black text-white px-2 py-1 text-xs font-bold uppercase">
-                    {p.voice_id}
-                  </div>
                 </div>
                 <h3 className="text-xl font-bold mb-2">{p.name}</h3>
                 <p className="text-gray-600 mb-4 text-sm font-medium border-l-4 border-gray-300 pl-2">
                   "{p.short_description}"
                 </p>
+                <div className="mb-4">
+                  <Link
+                    to={`/voices?voice_id=${encodeURIComponent(p.voice_id)}`}
+                    className="inline-block px-2 py-1 border border-black text-xs font-bold lowercase"
+                    title="View voice"
+                  >
+                    {voiceById.get(p.voice_id)?.voice_name || p.voice_id}
+                  </Link>
+                </div>
               </div>
             ))}
           </div>

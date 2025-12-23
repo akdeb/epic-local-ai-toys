@@ -7,8 +7,9 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::ffi::OsStr;
+use base64::Engine;
 
 mod python_setup;
 
@@ -44,6 +45,10 @@ fn get_elato_dir(app: &AppHandle) -> PathBuf {
     app.path()
         .app_data_dir()
         .expect("Failed to resolve app data directory")
+}
+
+fn get_voices_dir(app: &AppHandle) -> PathBuf {
+    get_elato_dir(app).join("voices")
 }
 
 fn get_venv_path(app: &AppHandle) -> PathBuf {
@@ -175,6 +180,87 @@ fn stop_api_server(app: &tauri::AppHandle) {
 #[tauri::command]
 fn greet(name: &str) -> String {
     format!("Hello, {}! You've been greeted from Rust!", name)
+}
+
+#[tauri::command]
+async fn download_voice(app: AppHandle, voice_id: String) -> Result<String, String> {
+    let url = format!(
+        "https://pub-6b92949063b142d59fc3478c56ec196c.r2.dev/{}.wav",
+        voice_id
+    );
+
+    let resp = reqwest::get(url)
+        .await
+        .map_err(|e| format!("Failed to download: {}", e))?;
+
+    if !resp.status().is_success() {
+        return Err(format!("Failed to download: HTTP {}", resp.status()));
+    }
+
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| format!("Failed to read response: {}", e))?;
+
+    let dir = get_voices_dir(&app);
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let path = dir.join(format!("{}.wav", voice_id));
+    fs::write(&path, &bytes).map_err(|e| e.to_string())?;
+
+    Ok(path.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+fn read_voice_base64(app: AppHandle, voice_id: String) -> Result<Option<String>, String> {
+    let path = get_voices_dir(&app).join(format!("{}.wav", voice_id));
+    if !path.exists() {
+        return Ok(None);
+    }
+    let mut f = fs::File::open(&path).map_err(|e| e.to_string())?;
+    let mut buf: Vec<u8> = vec![];
+    f.read_to_end(&mut buf).map_err(|e| e.to_string())?;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(buf);
+    Ok(Some(encoded))
+}
+
+#[tauri::command]
+fn list_downloaded_voices(app: AppHandle) -> Result<Vec<String>, String> {
+    let dir = get_voices_dir(&app);
+    if !dir.exists() {
+        return Ok(vec![]);
+    }
+
+    let mut out: Vec<String> = vec![];
+    let entries = fs::read_dir(&dir).map_err(|e| e.to_string())?;
+    for entry in entries.filter_map(Result::ok) {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let name = match path.file_name().and_then(|s| s.to_str()) {
+            Some(v) => v,
+            None => continue,
+        };
+        if !name.ends_with(".wav") {
+            continue;
+        }
+        let voice_id = name.trim_end_matches(".wav");
+        if !voice_id.is_empty() {
+            out.push(voice_id.to_string());
+        }
+    }
+    out.sort();
+    Ok(out)
+}
+
+#[tauri::command]
+fn get_voice_path(app: AppHandle, voice_id: String) -> Result<Option<String>, String> {
+    let path = get_voices_dir(&app).join(format!("{}.wav", voice_id));
+    if path.exists() {
+        Ok(Some(path.to_string_lossy().to_string()))
+    } else {
+        Ok(None)
+    }
 }
 
 #[tauri::command]
@@ -539,6 +625,10 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             greet,
+            download_voice,
+            read_voice_base64,
+            list_downloaded_voices,
+            get_voice_path,
             check_setup_status,
             create_python_venv,
             install_python_deps,

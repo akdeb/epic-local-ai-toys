@@ -418,48 +418,13 @@ class DBService:
         return items
 
     def _seed_defaults(self):
-        voice_defaults = [
-            {
-                "voice_id": "dave",
-                "gender": "male",
-                "voice_name": "Dave",
-                "voice_description": "Standard British male voice, helpful and precise.",
-                "voice_src": None,
-                "is_global": True,
-            },
-            {
-                "voice_id": "jo",
-                "gender": "female",
-                "voice_name": "Jo",
-                "voice_description": "Friendly American female voice, casual tone.",
-                "voice_src": None,
-                "is_global": True,
-            },
-            {
-                "voice_id": "mara",
-                "gender": "female",
-                "voice_name": "Mara",
-                "voice_description": "Professional female voice, articulate and efficient.",
-                "voice_src": None,
-                "is_global": True,
-            },
-            {
-                "voice_id": "santa",
-                "gender": "male",
-                "voice_name": "Santa",
-                "voice_description": "Jolly Santa Claus voice, festive and cheerful.",
-                "voice_src": None,
-                "is_global": True,
-            },
-        ]
-
         defaults = [
             {
                 "name": "Dave",
                 "prompt": "You are Dave, a helpful and knowledgeable AI assistant. You speak clearly and concisely.",
                 "short_description": "Standard British male voice, helpful and precise.",
                 "tags": ["assistant", "british", "male", "standard"],
-                "voice_id": "dave",
+                "voice_id": "radio",
                 "is_global": True
             },
             {
@@ -467,7 +432,7 @@ class DBService:
                 "prompt": "You are Jo, a friendly and casual AI companion. You like to keep things light and conversational.",
                 "short_description": "Friendly American female voice, casual tone.",
                 "tags": ["companion", "american", "female", "casual"],
-                "voice_id": "jo",
+                "voice_id": "british_woman_narrator",
                 "is_global": True
             },
             {
@@ -475,7 +440,7 @@ class DBService:
                 "prompt": "You are Mara, a professional and articulate assistant. You are efficient and get straight to the point.",
                 "short_description": "Professional female voice, articulate and efficient.",
                 "tags": ["professional", "female", "assistant", "articulate"],
-                "voice_id": "mara",
+                "voice_id": "narrator1",
                 "is_global": True
             },
             {
@@ -499,56 +464,43 @@ class DBService:
             has_voices_table = False
 
         if has_voices_table:
-            for v in voice_defaults:
-                cursor.execute("SELECT voice_id FROM voices WHERE voice_id = ?", (v["voice_id"],))
-                if not cursor.fetchone():
-                    cursor.execute(
-                        "INSERT INTO voices (voice_id, gender, voice_name, voice_description, voice_src, is_global) VALUES (?, ?, ?, ?, ?, ?)",
-                        (
-                            v["voice_id"],
-                            v.get("gender"),
-                            v["voice_name"],
-                            v.get("voice_description"),
-                            v.get("voice_src"),
-                            bool(v.get("is_global")),
-                        ),
-                    )
-
-            voices_url = os.environ.get("ELATO_VOICES_JSON_URL")
-            if voices_url:
-                try:
-                    with urllib.request.urlopen(voices_url, timeout=5) as resp:
-                        payload = json.loads(resp.read().decode("utf-8"))
-                    if isinstance(payload, list):
-                        for item in payload:
-                            if not isinstance(item, dict):
-                                continue
-                            vid = item.get("voice_id") or item.get("id")
-                            vname = item.get("voice_name") or item.get("name")
-                            if not vid or not vname:
-                                continue
-                            cursor.execute(
-                                """
-                                INSERT INTO voices (voice_id, gender, voice_name, voice_description, voice_src, is_global)
-                                VALUES (?, ?, ?, ?, ?, ?)
-                                ON CONFLICT(voice_id) DO UPDATE SET
-                                  gender = excluded.gender,
-                                  voice_name = excluded.voice_name,
-                                  voice_description = excluded.voice_description,
-                                  voice_src = excluded.voice_src,
-                                  is_global = excluded.is_global
-                                """,
-                                (
-                                    str(vid),
-                                    item.get("gender"),
-                                    str(vname),
-                                    item.get("voice_description") or item.get("description"),
-                                    item.get("voice_src") or item.get("src"),
-                                    True,
-                                ),
-                            )
-                except Exception:
-                    pass
+            voices_url = os.environ.get(
+                "ELATO_VOICES_JSON_URL",
+                "https://raw.githubusercontent.com/akdeb/epic-local-ai-toys/refs/heads/main/elato-ui/src/assets/voices.json",
+            )
+            try:
+                with urllib.request.urlopen(voices_url, timeout=10) as resp:
+                    payload = json.loads(resp.read().decode("utf-8"))
+                if isinstance(payload, list):
+                    for item in payload:
+                        if not isinstance(item, dict):
+                            continue
+                        vid = item.get("voice_id") or item.get("id")
+                        vname = item.get("voice_name") or item.get("name")
+                        if not vid or not vname:
+                            continue
+                        cursor.execute(
+                            """
+                            INSERT INTO voices (voice_id, gender, voice_name, voice_description, voice_src, is_global)
+                            VALUES (?, ?, ?, ?, ?, ?)
+                            ON CONFLICT(voice_id) DO UPDATE SET
+                              gender = excluded.gender,
+                              voice_name = excluded.voice_name,
+                              voice_description = excluded.voice_description,
+                              voice_src = excluded.voice_src,
+                              is_global = excluded.is_global
+                            """,
+                            (
+                                str(vid),
+                                item.get("gender"),
+                                str(vname),
+                                item.get("voice_description") or item.get("description"),
+                                item.get("voice_src") or item.get("src"),
+                                True,
+                            ),
+                        )
+            except Exception:
+                pass
         
         for p in defaults:
             # Check if exists by voice_id to avoid duplicates on restart
@@ -564,7 +516,7 @@ class DBService:
         row = cursor.fetchone()
         has_users = bool(row and row["n"])
         if not has_users:
-            cursor.execute("SELECT id FROM personalities WHERE voice_id = ?", ("dave",))
+            cursor.execute("SELECT id FROM personalities WHERE voice_id = ?", ("radio",))
             p_row = cursor.fetchone()
             default_personality_id = p_row["id"] if p_row else None
             default_user_id = str(uuid.uuid4())
@@ -679,7 +631,7 @@ class DBService:
 
     def create_personality(self, name: str, prompt: str, short_description: str, tags: List[str], voice_id: str, is_visible: bool = True, is_global: bool = False) -> Personality:
         if self.get_voice(voice_id) is None:
-            voice_id = "dave"
+            voice_id = "radio"
         p_id = str(uuid.uuid4())
         conn = self._get_conn()
         cursor = conn.cursor()
@@ -799,7 +751,7 @@ class DBService:
             values.append(kwargs["is_visible"])
         if "voice_id" in kwargs:
             if self.get_voice(kwargs["voice_id"]) is None:
-                kwargs["voice_id"] = "dave"
+                kwargs["voice_id"] = "radio"
             fields.append("voice_id = ?")
             values.append(kwargs["voice_id"])
             
