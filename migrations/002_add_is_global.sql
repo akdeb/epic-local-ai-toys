@@ -1,0 +1,1 @@
+ALTER TABLE personalities ADD COLUMN is_global BOOLEAN DEFAULT 0;
