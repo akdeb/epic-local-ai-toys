@@ -42,10 +42,6 @@ extern const char *ws_server;
 extern const uint16_t ws_port;
 extern const char *ws_path;
 
-// Backend server details
-extern const char *backend_server;
-extern const uint16_t backend_port;
-
 // I2S and Audio parameters
 extern const uint32_t SAMPLE_RATE;
 extern const uint32_t INPUT_SAMPLE_RATE;

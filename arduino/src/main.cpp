@@ -6,7 +6,6 @@
 #include "WifiManager.h"
 #include <driver/touch_sensor.h>
 #include "Button.h"
-#include "FactoryReset.h"
 #include "soc/soc.h"
 #include "soc/rtc_cntl_reg.h"
 

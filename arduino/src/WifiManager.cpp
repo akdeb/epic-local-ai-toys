@@ -12,11 +12,6 @@
 #include <Preferences.h>
 #include <Config.h>
 
-void connectCb() {
-  Serial.println("On connecting to Wifi");
-  websocketSetup(ws_server, ws_port, ws_path);
-}
-
 /**
  * @brief Write a message to the Serial interface
  * @param msg The message to be written
@@ -437,7 +432,7 @@ bool WIFIMANAGER::tryConnect() {
         logMessage("[WIFI] Connection successful\n");
         logMessage("[WIFI] SSID   : " + WiFi.SSID() + "\n");
         logMessage("[WIFI] IP     : " + WiFi.localIP().toString() + "\n");
-        connectCb();
+        websocketSetup(ws_server, ws_port, ws_path);
         stopSoftAP();
         return true;
       case WL_CONNECT_FAILED:

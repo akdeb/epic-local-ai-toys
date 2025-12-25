@@ -32,7 +32,11 @@
       "../../resources/python"
     ],
     "macOS": {
-      "infoPlist": "./Info.plist"
+      "infoPlist": "./Info.plist",
+      "entitlements": "./entitlements.plist",
+      "hardenedRuntime": true,
+      "signingIdentity": null,
+      "providerShortName": null
     },
     "icon": [
       "icons/32x32.png",

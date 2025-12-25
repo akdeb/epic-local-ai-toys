@@ -1,5 +1,5 @@
 import { Link, useLocation } from 'react-router-dom';
-import { Users, Cpu, Mic2, LockKeyhole, MessagesSquare, Volume2, LayoutGrid } from 'lucide-react';
+import { Users, Cpu, LockKeyhole, MessagesSquare, Volume2, LayoutGrid } from 'lucide-react';
 import clsx from 'clsx';
 import { useActiveUser } from '../state/ActiveUserContext';
 import { useEffect, useState } from 'react';

@@ -651,7 +651,7 @@ pub fn run() {
                 .arg("uvicorn")
                 .arg("server:app")
                 .arg("--host")
-                .arg("127.0.0.1")
+                .arg("0.0.0.0")
                 .arg("--port")
                 .arg("8000")
                 .current_dir(&python_dir)
