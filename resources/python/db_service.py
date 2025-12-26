@@ -125,6 +125,15 @@ class DBService:
         self._seed_defaults()
         self.seeded_ok = True
 
+    def sync_global_voices_and_personalities(self) -> None:
+        conn = self._get_conn()
+        cursor = conn.cursor()
+        try:
+            self._sync_global_voices_and_personalities(cursor, conn)
+            conn.commit()
+        finally:
+            conn.close()
+
     def get_table_count(self, table: str) -> int:
         try:
             conn = self._get_conn()
@@ -440,13 +449,43 @@ class DBService:
         conn = self._get_conn()
         cursor = conn.cursor()
 
-        # Seed voices first (ignore if voices table doesn't exist yet)
         try:
-            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='voices'")
-            has_voices_table = bool(cursor.fetchone())
+            self._sync_global_voices_and_personalities(cursor, conn)
         except Exception:
-            has_voices_table = False
+            pass
 
+        cursor.execute("SELECT COUNT(1) AS n FROM users")
+        row = cursor.fetchone()
+        has_users = bool(row and row["n"])
+        if not has_users:
+            cursor.execute("SELECT id FROM personalities WHERE voice_id = ?", ("radio",))
+            p_row = cursor.fetchone()
+            default_personality_id = p_row["id"] if p_row else None
+            default_user_id = str(uuid.uuid4())
+
+            hobbies_csv = os.environ.get("ELATO_DEFAULT_USER_HOBBIES", "reading,lego,science")
+            default_hobbies = ", ".join([h.strip() for h in hobbies_csv.split(",") if h.strip()])
+
+            default_user_name = "Elato"
+            cursor.execute(
+                """INSERT INTO users (id, name, age, dob, hobbies, about_you, personality_type, likes, current_personality_id, user_type)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (default_user_id, default_user_name, 11, None, json.dumps([]), default_hobbies, None, json.dumps([]), default_personality_id, "family")
+            )
+
+        conn.commit()
+        conn.close()
+
+        if not self.get_active_user_id():
+            conn = self._get_conn()
+            cursor = conn.cursor()
+            cursor.execute("SELECT id FROM users ORDER BY rowid ASC LIMIT 1")
+            u = cursor.fetchone()
+            conn.close()
+            if u and u["id"]:
+                self.set_active_user_id(u["id"])
+
+    def _load_global_assets_payloads(self) -> tuple[Optional[Any], Optional[Any]]:
         base_dir = os.path.dirname(os.path.abspath(__file__))
         assets_candidates = [
             os.environ.get("ELATO_ASSETS_DIR"),
@@ -484,11 +523,30 @@ class DBService:
         voices_payload = _load_json_url(voices_url)
         personalities_payload = _load_json_url(personalities_url)
 
-        # Fallback to local assets for dev/offline.
         if voices_payload is None and assets_dir:
             voices_payload = _load_json_file(os.path.join(assets_dir, "voices.json"))
         if personalities_payload is None and assets_dir:
             personalities_payload = _load_json_file(os.path.join(assets_dir, "personalities.json"))
+
+        return voices_payload, personalities_payload
+
+    def _sync_global_voices_and_personalities(self, cursor: Any, conn: Any) -> None:
+        try:
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='voices'")
+            has_voices_table = bool(cursor.fetchone())
+        except Exception:
+            has_voices_table = False
+
+        try:
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='personalities'")
+            has_personalities_table = bool(cursor.fetchone())
+        except Exception:
+            has_personalities_table = False
+
+        if not has_voices_table and not has_personalities_table:
+            return
+
+        voices_payload, personalities_payload = self._load_global_assets_payloads()
 
         if has_voices_table and isinstance(voices_payload, list):
             for item in voices_payload:
@@ -509,6 +567,7 @@ class DBService:
                       voice_src = excluded.voice_src,
                       is_global = excluded.is_global,
                       created_at = COALESCE(voices.created_at, excluded.created_at)
+                    WHERE voices.is_global = 1
                     """,
                     (
                         str(vid),
@@ -521,15 +580,7 @@ class DBService:
                     ),
                 )
 
-            # Ensure voice inserts are visible even if later logic uses a different connection.
             conn.commit()
-
-        # Seed personalities from local personalities.json (ignore if table missing)
-        try:
-            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='personalities'")
-            has_personalities_table = bool(cursor.fetchone())
-        except Exception:
-            has_personalities_table = False
 
         if has_personalities_table and isinstance(personalities_payload, list):
             for item in personalities_payload:
@@ -544,7 +595,6 @@ class DBService:
                 if not p_id or not name or not prompt or voice_id is None:
                     continue
 
-                # Enforce many-to-one relationship: personality.voice_id must exist in voices table.
                 try:
                     cursor.execute("SELECT 1 FROM voices WHERE voice_id = ? LIMIT 1", (str(voice_id),))
                     if not cursor.fetchone():
@@ -566,6 +616,7 @@ class DBService:
                       is_global = excluded.is_global,
                       img_src = excluded.img_src,
                       created_at = COALESCE(personalities.created_at, excluded.created_at)
+                    WHERE personalities.is_global = 1
                     """,
                     (
                         str(p_id),
@@ -580,37 +631,6 @@ class DBService:
                         time.time(),
                     ),
                 )
-
-        cursor.execute("SELECT COUNT(1) AS n FROM users")
-        row = cursor.fetchone()
-        has_users = bool(row and row["n"])
-        if not has_users:
-            cursor.execute("SELECT id FROM personalities WHERE voice_id = ?", ("radio",))
-            p_row = cursor.fetchone()
-            default_personality_id = p_row["id"] if p_row else None
-            default_user_id = str(uuid.uuid4())
-
-            hobbies_csv = os.environ.get("ELATO_DEFAULT_USER_HOBBIES", "reading,lego,science")
-            default_hobbies = ", ".join([h.strip() for h in hobbies_csv.split(",") if h.strip()])
-
-            default_user_name = "Elato"
-            cursor.execute(
-                """INSERT INTO users (id, name, age, dob, hobbies, about_you, personality_type, likes, current_personality_id, user_type)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (default_user_id, default_user_name, 11, None, json.dumps([]), default_hobbies, None, json.dumps([]), default_personality_id, "family")
-            )
-
-        conn.commit()
-        conn.close()
-
-        if not self.get_active_user_id():
-            conn = self._get_conn()
-            cursor = conn.cursor()
-            cursor.execute("SELECT id FROM users ORDER BY rowid ASC LIMIT 1")
-            u = cursor.fetchone()
-            conn.close()
-            if u and u["id"]:
-                self.set_active_user_id(u["id"])
 
     # --- Personalities CRUD ---
 

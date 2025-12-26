@@ -79,6 +79,9 @@ export const Personalities = () => {
   const sortedPersonalities = useMemo(() => {
     const arr = Array.isArray(personalities) ? personalities.slice() : [];
     arr.sort((a, b) => {
+      const aG = Boolean(a?.is_global);
+      const bG = Boolean(b?.is_global);
+      if (aG !== bG) return aG ? 1 : -1;
       const aT = toTimestamp(a?.created_at);
       const bT = toTimestamp(b?.created_at);
       if (aT !== bT) return bT - aT;

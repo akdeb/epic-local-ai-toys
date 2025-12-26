@@ -241,6 +241,12 @@ async def lifespan(app: FastAPI):
     # Initialize database (already handled by module import, but logging for clarity)
     logger.info("Database service active")
 
+    # Sync latest global voices/personalities on startup (best-effort).
+    try:
+        db_service.db_service.sync_global_voices_and_personalities()
+    except Exception as e:
+        logger.warning(f"Global assets sync failed: {e}")
+
     # Set defaults if not already set (e.g. running via uvicorn directly)
     if not hasattr(app.state, "stt_model"):
         app.state.stt_model = STT
