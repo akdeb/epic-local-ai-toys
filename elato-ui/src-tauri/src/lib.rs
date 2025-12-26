@@ -10,6 +10,8 @@ use std::fs;
 use std::io::{Read, Write};
 use std::ffi::OsStr;
 use base64::Engine;
+use flate2::read::GzDecoder;
+use tar::Archive;
 
 mod python_setup;
 
@@ -63,12 +65,158 @@ fn get_venv_path(app: &AppHandle) -> PathBuf {
     get_elato_dir(app).join("python_env")
 }
 
+fn get_bootstrap_python_root(app: &AppHandle) -> PathBuf {
+    get_elato_dir(app).join("python_runtime")
+}
+
+fn get_bootstrap_python(app: &AppHandle) -> PathBuf {
+    // python-build-standalone "install_only" archives typically extract to a top-level "python" dir.
+    let root = get_bootstrap_python_root(app);
+    let bin = root.join("python").join("bin");
+    // Keep this intentionally minimal.
+    // In practice these archives provide either `python` or `python3`.
+    let python = bin.join("python");
+    if python.exists() {
+        return python;
+    }
+    bin.join("python3")
+}
+
+async fn resolve_bootstrap_python_url() -> Result<String, String> {
+    // Allow overriding the URL in case we need to hotfix.
+    if let Ok(url) = env::var("ELATO_BOOTSTRAP_PYTHON_URL") {
+        if !url.trim().is_empty() {
+            return Ok(url);
+        }
+    }
+
+    // Apple Silicon only: resolve a CPython 3.11 macOS aarch64 install_only tarball.
+    // We intentionally do NOT use `releases/latest` because the latest tag may not include CPython 3.11.
+    let api_url = "https://api.github.com/repos/astral-sh/python-build-standalone/releases?per_page=20";
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(api_url)
+        .header("User-Agent", "elato-ui")
+        .send()
+        .await
+        .map_err(|e| format!("Failed to query python-build-standalone releases: {e}"))?;
+
+    if !resp.status().is_success() {
+        return Err(format!(
+            "Failed to query python-build-standalone releases: HTTP {}",
+            resp.status()
+        ));
+    }
+
+    let body = resp
+        .text()
+        .await
+        .map_err(|e| format!("Failed to read python-build-standalone releases response: {e}"))?;
+    let v: serde_json::Value =
+        serde_json::from_str(&body).map_err(|e| format!("Failed to parse releases JSON: {e}"))?;
+
+    let releases = v
+        .as_array()
+        .ok_or_else(|| "python-build-standalone releases JSON was not a list".to_string())?;
+
+    for rel in releases {
+        let assets = match rel.get("assets").and_then(|a| a.as_array()) {
+            Some(a) => a,
+            None => continue,
+        };
+
+        for asset in assets {
+            let name = asset.get("name").and_then(|n| n.as_str()).unwrap_or("");
+            // Example name:
+            // cpython-3.11.10+20241016-aarch64-apple-darwin-install_only.tar.gz
+            if name.starts_with("cpython-3.11")
+                && name.contains("aarch64-apple-darwin")
+                && name.ends_with("install_only.tar.gz")
+            {
+                let url = asset
+                    .get("browser_download_url")
+                    .and_then(|u| u.as_str())
+                    .ok_or_else(|| {
+                        "python-build-standalone asset missing browser_download_url".to_string()
+                    })?;
+                return Ok(url.to_string());
+            }
+        }
+    }
+
+    Err("No matching CPython 3.11 aarch64 macOS install_only asset found in recent python-build-standalone releases. Set ELATO_BOOTSTRAP_PYTHON_URL explicitly.".to_string())
+}
+
+async fn bootstrap_python_if_needed(app: &AppHandle) -> Result<PathBuf, String> {
+    // Apple Silicon only (as requested)
+    if cfg!(target_arch = "aarch64") == false {
+        return Err("This build supports Apple Silicon only".to_string());
+    }
+
+    let python_path = get_bootstrap_python(app);
+    if python_path.exists() {
+        return Ok(python_path);
+    }
+
+    let root = get_bootstrap_python_root(app);
+    fs::create_dir_all(&root).map_err(|e| e.to_string())?;
+
+    let url = resolve_bootstrap_python_url().await?;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(url)
+        .header("User-Agent", "elato-ui")
+        .send()
+        .await
+        .map_err(|e| format!("Failed to download Python: {e}"))?;
+
+    if !resp.status().is_success() {
+        return Err(format!("Failed to download Python: HTTP {}", resp.status()));
+    }
+
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| format!("Failed to read Python download: {e}"))?;
+
+    // Write to temp tarball in app data
+    let tar_path = root.join("python_runtime.tar.gz");
+    fs::write(&tar_path, &bytes).map_err(|e| e.to_string())?;
+
+    // Extract (best-effort cleanup on failure)
+    let tar_gz = fs::File::open(&tar_path).map_err(|e| e.to_string())?;
+    let dec = GzDecoder::new(tar_gz);
+    let mut archive = Archive::new(dec);
+    archive.unpack(&root).map_err(|e| {
+        let _ = fs::remove_file(&tar_path);
+        e.to_string()
+    })?;
+
+    let _ = fs::remove_file(&tar_path);
+
+    let python_path = get_bootstrap_python(app);
+    if !python_path.exists() {
+        return Err(format!(
+            "Python bootstrap completed but python executable not found at {}",
+            python_path.display()
+        ));
+    }
+
+    Ok(python_path)
+}
+
 fn get_venv_python(app: &AppHandle) -> PathBuf {
     let venv = get_venv_path(app);
     if cfg!(target_os = "windows") {
         venv.join("Scripts").join("python.exe")
     } else {
-        venv.join("bin").join("python")
+        let bin = venv.join("bin");
+        let python = bin.join("python");
+        if python.exists() {
+            return python;
+        }
+        bin.join("python3")
     }
 }
 
@@ -77,7 +225,12 @@ fn get_venv_pip(app: &AppHandle) -> PathBuf {
     if cfg!(target_os = "windows") {
         venv.join("Scripts").join("pip.exe")
     } else {
-        venv.join("bin").join("pip")
+        let bin = venv.join("bin");
+        let pip = bin.join("pip");
+        if pip.exists() {
+            return pip;
+        }
+        bin.join("pip3")
     }
 }
 
@@ -317,29 +470,36 @@ async fn check_setup_status(app: AppHandle) -> Result<SetupStatus, String> {
     let venv_python = get_venv_python(&app);
     let venv_exists = venv_python.exists();
 
-    // Check system Python
-    let python_check = Command::new("python3")
-        .arg("--version")
-        .output();
+    // Prefer reporting the Python we will actually use (venv > bootstrapped runtime).
+    let bootstrap_python = get_bootstrap_python(&app);
 
-    let (python_installed, python_version, python_path) = match python_check {
-        Ok(output) if output.status.success() => {
-            let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            let path_output = Command::new("which")
-                .arg("python3")
-                .output()
-                .ok()
-                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
-            (true, Some(version), path_output)
-        }
-        _ => (false, None, None),
+    let (python_installed, python_version, python_path) = if venv_exists {
+        let output = Command::new(venv_python.to_str().unwrap())
+            .arg("--version")
+            .output()
+            .ok();
+        let v = output
+            .as_ref()
+            .and_then(|o| if o.status.success() { Some(String::from_utf8_lossy(&o.stdout).trim().to_string()) } else { None });
+        (true, v, Some(venv_python.to_string_lossy().to_string()))
+    } else if bootstrap_python.exists() {
+        let output = Command::new(bootstrap_python.to_str().unwrap())
+            .arg("--version")
+            .output()
+            .ok();
+        let v = output
+            .as_ref()
+            .and_then(|o| if o.status.success() { Some(String::from_utf8_lossy(&o.stdout).trim().to_string()) } else { None });
+        (true, v, Some(bootstrap_python.to_string_lossy().to_string()))
+    } else {
+        (false, None, None)
     };
 
     // Check if deps are installed in venv
     let deps_installed = if venv_exists {
         let check = Command::new(venv_python.to_str().unwrap())
             .arg("-c")
-            .arg("import mlx; import mlx_audio; import fastapi; import uvicorn; import serial; import esptool")
+            .arg("import mlx; import mlx_audio; import fastapi; import uvicorn; import serial; import esptool; import tokenizers")
             .output();
         check.map(|o| o.status.success()).unwrap_or(false)
     } else {
@@ -360,6 +520,11 @@ async fn check_setup_status(app: AppHandle) -> Result<SetupStatus, String> {
 async fn create_python_venv(app: AppHandle) -> Result<String, String> {
     let venv_path = get_venv_path(&app);
     let venv_python = get_venv_python(&app);
+
+    // Apple Silicon only: always use our bootstrapped Python runtime.
+    // This ensures end users don't depend on a pre-installed system Python.
+    app.emit("setup-progress", "Downloading Python runtime (first time only)...").ok();
+    let python_for_venv = bootstrap_python_if_needed(&app).await?;
 
     // 1. Check if a valid venv already exists (has python binary)
     if venv_python.exists() {
@@ -384,7 +549,7 @@ async fn create_python_venv(app: AppHandle) -> Result<String, String> {
 
     app.emit("setup-progress", "Creating Python virtual environment...").ok();
 
-    let output = Command::new("python3")
+    let output = Command::new(python_for_venv.to_str().unwrap())
         .arg("-m")
         .arg("venv")
         .arg("--clear")
@@ -630,12 +795,14 @@ pub fn run() {
                 }
             };
 
-            // Determine which python to use
-            let python_path = if venv_python.exists() {
-                venv_python
-            } else {
-                PathBuf::from("python3")
-            };
+            // Only start the server when the venv exists.
+            // This prevents first-launch crashes for users who haven't completed setup yet.
+            if !venv_python.exists() {
+                println!("[TAURI] Python env not ready yet. Skipping API server start.");
+                return Ok(());
+            }
+
+            let python_path = venv_python;
 
             println!("[TAURI] Starting Python API server...");
             println!("[TAURI] Python: {:?}", python_path);

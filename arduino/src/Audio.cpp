@@ -358,9 +358,10 @@ void webSocketEvent(WStype_t type, uint8_t *payload, size_t length)
 }
 
 // wifiTask -> WIFIMANAGER::loop() -> WIFIMANAGER::tryConnect() -> connectCb() -> websocketSetup()
-void websocketSetup(String server_domain, int port, String path)
+void websocketSetup(const String& server_domain, int port, const String& path)
 {
-    String headers = "Authorization: Bearer " + String(authTokenGlobal);
+    // Include both auth token and client type header
+    String headers = "Authorization: Bearer " + String(authTokenGlobal) + "\r\nX-Client-Type: esp32";
 
     xSemaphoreTake(wsMutex, portMAX_DELAY);
 

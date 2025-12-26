@@ -19,7 +19,8 @@ from engine.characters import build_llm_messages, build_runtime_context, build_s
 import mlx.core as mx
 import numpy as np
 import uvicorn
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Query
+from starlette.websockets import WebSocketState
 from mlx_lm import generate as mx_generate
 from mlx_lm.utils import load as load_llm
 
@@ -27,7 +28,11 @@ from mlx_audio.stt.models.whisper import Model as Whisper
 from tts import ChatterboxTTS
 import db_service  # DB ops exposed via HTTP endpoints
 from fastapi.middleware.cors import CORSMiddleware
-from utils import STT, LLM, TTS
+from utils import STT, LLM, TTS, create_opus_packetizer
+
+# Client type constants
+CLIENT_TYPE_DESKTOP = "desktop"
+CLIENT_TYPE_ESP32 = "esp32"
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
@@ -469,279 +474,7 @@ async def firmware_flash(body: FirmwareFlashRequest):
 
     return await asyncio.to_thread(run)
 
-# --- ESP32 WebSocket Endpoint ---
-# Mirrors /ws but for ESP32 binary audio (no base64, direct PCM bytes)
-
 import webrtcvad
-
-@app.websocket("/ws/esp32")
-async def websocket_esp32(websocket: WebSocket):
-    """
-    ESP32 voice pipeline endpoint.
-    Same flow as /ws but:
-    - Receives raw PCM bytes (not base64 JSON)
-    - Uses VAD for end-of-speech detection
-    - Sends raw PCM bytes back (not base64)
-    - Sends JSON control messages for device state
-    """
-    await websocket.accept()
-    
-    if not pipeline:
-        await websocket.close()
-        return
-
-    session_id = str(uuid.uuid4())
-    
-    # Get active user/personality
-    active_user_id = db_service.db_service.get_active_user_id()
-    personality_id = None
-    if active_user_id:
-        u = db_service.db_service.get_user(active_user_id)
-        personality_id = u.current_personality_id if u else None
-
-    personality = None
-    if personality_id:
-        try:
-            personality = db_service.db_service.get_personality(personality_id)
-        except Exception:
-            personality = None
-
-    def _build_llm_context(user_text: str) -> List[Dict[str, str]]:
-        try:
-            convos = db_service.db_service.get_conversations(session_id=session_id)
-        except Exception:
-            convos = []
-
-        runtime = build_runtime_context()
-        user_ctx = None
-        try:
-            u = db_service.db_service.get_user(active_user_id) if active_user_id else None
-            if u:
-                user_ctx = {
-                    "name": u.name,
-                    "age": u.age,
-                    "about_you": getattr(u, "about_you", "") or "",
-                    "user_type": u.user_type,
-                }
-        except Exception:
-            user_ctx = None
-
-        behavior_constraints = (
-            "You always respond with short sentences. "
-            "Avoid punctuation like parentheses or colons that would not appear in conversational speech."
-        )
-
-        sys_prompt = build_system_prompt(
-            personality_name=getattr(personality, "name", None),
-            personality_prompt=getattr(personality, "prompt", None),
-            user_context=user_ctx,
-            runtime=runtime,
-            extra_system_prompt=behavior_constraints,
-        )
-
-        history_msgs: List[Dict[str, str]] = []
-        for c in convos:
-            if c.role == "user":
-                history_msgs.append({"role": "user", "content": c.transcript})
-            elif c.role == "ai":
-                history_msgs.append({"role": "assistant", "content": c.transcript})
-
-        return build_llm_messages(
-            system_prompt=sys_prompt,
-            history=history_msgs,
-            user_text=user_text,
-            max_history_messages=30,
-        )
-
-    # Start session
-    db_service.db_service.start_session(
-        session_id=session_id,
-        client_type="device",
-        user_id=active_user_id,
-        personality_id=personality_id,
-    )
-    
-    # Send auth to device
-    volume = 70
-    try:
-        raw = db_service.db_service.get_setting("laptop_volume")
-        if raw is not None:
-            volume = int(raw)
-    except Exception:
-        volume = 70
-    
-    try:
-        await websocket.send_json({
-            "type": "auth",
-            "volume_control": volume,
-            "pitch_factor": 1.0,
-            "is_ota": False,
-            "is_reset": False
-        })
-    except Exception:
-        return
-
-    logger.info(f"[ESP32] Client connected, session={session_id}")
-
-    # Initial greeting
-    cancel_event = asyncio.Event()
-    try:
-        greeting_user_text = "[System] The device just connected. Greet the user with a short friendly sentence (under 8 words)."
-        greeting_messages = _build_llm_context(greeting_user_text)
-        greeting_text = await pipeline.generate_response(
-            greeting_user_text, messages=greeting_messages, max_tokens=50
-        )
-        greeting_text = greeting_text.strip() or "Hello!"
-        try:
-            await websocket.send_json({"type": "server", "msg": "RESPONSE.CREATED", "volume_control": volume})
-        except Exception:
-            pass
-
-        ref_audio_path = _resolve_voice_ref_audio_path(getattr(personality, "voice_id", None))
-        async for audio_chunk in pipeline.synthesize_speech(greeting_text, ref_audio_path=ref_audio_path):
-            try:
-                await websocket.send_bytes(audio_chunk)
-            except Exception:
-                break
-
-        try:
-            await websocket.send_json({"type": "server", "msg": "RESPONSE.COMPLETE"})
-        except Exception:
-            pass
-
-        try:
-            db_service.db_service.log_conversation(role="ai", transcript=greeting_text, session_id=session_id)
-        except Exception:
-            pass
-    except Exception as e:
-        logger.error(f"[ESP32] Greeting generation failed: {e}")
-
-    # VAD setup
-    vad = webrtcvad.Vad(3)
-    audio_buffer = bytearray()
-    input_sample_rate = 16000
-    vad_frame_ms = 30
-    vad_frame_bytes = int(input_sample_rate * vad_frame_ms / 1000) * 2
-    
-    speech_frames = []
-    is_speaking = False
-    silence_count = 0
-    SILENCE_FRAMES = int(1.5 / (vad_frame_ms / 1000))  # 1.5s
-    
-    try:
-        while True:
-            try:
-                message = await websocket.receive()
-            except Exception:
-                break
-            
-            if message.get("type") == "websocket.disconnect":
-                break
-            
-            # Binary audio from ESP32
-            if "bytes" in message:
-                audio_buffer.extend(message["bytes"])
-                
-                # VAD processing
-                while len(audio_buffer) >= vad_frame_bytes:
-                    frame = bytes(audio_buffer[:vad_frame_bytes])
-                    audio_buffer = audio_buffer[vad_frame_bytes:]
-                    
-                    is_speech = vad.is_speech(frame, input_sample_rate)
-                    
-                    if is_speech:
-                        if not is_speaking:
-                            is_speaking = True
-                            logger.info("[ESP32] Speech started")
-                        speech_frames.append(frame)
-                        silence_count = 0
-                    elif is_speaking:
-                        speech_frames.append(frame)
-                        silence_count += 1
-                        
-                        if silence_count > SILENCE_FRAMES:
-                            is_speaking = False
-                            logger.info("[ESP32] Speech ended, processing...")
-                            
-                            # Combine and transcribe
-                            full_audio = b"".join(speech_frames)
-                            speech_frames = []
-                            silence_count = 0
-                            
-                            transcription = await pipeline.transcribe(full_audio)
-                            
-                            if transcription and transcription.strip():
-                                logger.info(f"[ESP32] Transcript: {transcription}")
-                                db_service.db_service.log_conversation(
-                                    role="user", transcript=transcription, session_id=session_id
-                                )
-                                
-                                try:
-                                    await websocket.send_json({"type": "server", "msg": "AUDIO.COMMITTED"})
-                                except Exception:
-                                    break
-                                
-                                # Generate LLM response, then stream TTS
-                                cancel_event.clear()
-                                llm_messages = _build_llm_context(transcription)
-                                
-                                full_response = await pipeline.generate_response(
-                                    transcription, messages=llm_messages
-                                )
-                                
-                                if cancel_event.is_set() or not full_response.strip():
-                                    continue
-                                
-                                logger.info(f"[ESP32] LLM response: {full_response}")
-                                
-                                try:
-                                    await websocket.send_json({
-                                        "type": "server",
-                                        "msg": "RESPONSE.CREATED",
-                                        "volume_control": volume
-                                    })
-                                except Exception:
-                                    break
-                                
-                                # Stream TTS audio
-                                ref_audio_path = _resolve_voice_ref_audio_path(getattr(personality, "voice_id", None))
-                                async for audio_chunk in pipeline.synthesize_speech(
-                                    full_response,
-                                    cancel_event,
-                                    ref_audio_path=ref_audio_path,
-                                ):
-                                    if cancel_event.is_set():
-                                        break
-                                    try:
-                                        await websocket.send_bytes(audio_chunk)
-                                    except Exception:
-                                        cancel_event.set()
-                                        break
-                                
-                                # Log AI response
-                                db_service.db_service.log_conversation(
-                                    role="ai", transcript=full_response, session_id=session_id
-                                )
-                                
-                                try:
-                                    await websocket.send_json({"type": "server", "msg": "RESPONSE.COMPLETE"})
-                                except Exception:
-                                    break
-            
-            # JSON config messages
-            elif "text" in message:
-                try:
-                    data = json.loads(message["text"])
-                    if "system_prompt" in data:
-                        session_system_prompt = data["system_prompt"]
-                except Exception:
-                    pass
-                    
-    except WebSocketDisconnect:
-        logger.info("[ESP32] Disconnected")
-    finally:
-        db_service.db_service.end_session(session_id)
-        logger.info(f"[ESP32] Session ended: {session_id}")
 
 # --- Models endpoint (for frontend Models.tsx) ---
 
@@ -1026,266 +759,523 @@ async def shutdown():
 
 
 @app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
+async def websocket_unified(websocket: WebSocket, client_type: str = Query(default=CLIENT_TYPE_DESKTOP)):
     """
-    WebSocket endpoint for voice communication.
-
-    Protocol:
-    - Client sends: {"type": "audio", "data": "<base64 encoded int16 PCM audio>"}
-    - Client sends: {"type": "end_of_speech"} to signal end of utterance
+    Unified WebSocket endpoint for voice communication.
+    
+    Supports two client types differentiated by query param or header:
+    - desktop (default): React UI client - uses base64 JSON audio
+    - esp32: ESP32 device - uses raw PCM binary + Opus output
+    
+    Query param: ?client_type=esp32 or ?client_type=desktop
+    Header: X-Client-Type: esp32 or X-Client-Type: desktop
+    
+    Desktop Protocol:
+    - Client sends: {"type": "audio", "data": "<base64 int16 PCM>"}
+    - Client sends: {"type": "end_of_speech"}
     - Server sends: {"type": "transcription", "text": "..."}
     - Server sends: {"type": "response", "text": "..."}
-    - Server sends: {"type": "audio", "data": "<base64 encoded int16 PCM audio>"}
+    - Server sends: {"type": "audio", "data": "<base64 int16 PCM>"}
     - Server sends: {"type": "audio_end"}
+    
+    ESP32 Protocol:
+    - Client sends: raw PCM16 bytes at 16kHz
+    - Client sends: {"type": "instruction", "msg": "end_of_speech"}
+    - Server sends: {"type": "server", "msg": "RESPONSE.CREATED"/"RESPONSE.COMPLETE"/"AUDIO.COMMITTED"}
+    - Server sends: Opus-encoded audio bytes at 24kHz
     """
-    await manager.connect(websocket)
+    # Check header for client type override
+    header_client = websocket.headers.get("x-client-type", "").lower()
+    if header_client in (CLIENT_TYPE_ESP32, CLIENT_TYPE_DESKTOP):
+        client_type = header_client
+    
+    is_esp32 = client_type == CLIENT_TYPE_ESP32
+    client_label = "[ESP32]" if is_esp32 else "[Desktop]"
+    
+    if is_esp32:
+        await websocket.accept()
+    else:
+        await manager.connect(websocket)
+
+    if not pipeline:
+        await websocket.close()
+        return
 
     session_id = str(uuid.uuid4())
+    
+    # Get active user/personality
+    user_id = db_service.db_service.get_active_user_id()
+    personality_id = None
+    if user_id:
+        u = db_service.db_service.get_user(user_id)
+        personality_id = u.current_personality_id if u else None
+    
+    personality = None
+    if personality_id:
+        try:
+            personality = db_service.db_service.get_personality(personality_id)
+        except Exception:
+            personality = None
+
+    # Start session
     try:
-        user_id = db_service.db_service.get_active_user_id()
-        personality_id = None
-        if user_id:
-            u = db_service.db_service.get_user(user_id)
-            personality_id = u.current_personality_id if u else None
         db_service.db_service.start_session(
             session_id=session_id,
-            client_type="desktop",
+            client_type="device" if is_esp32 else "desktop",
             user_id=user_id,
             personality_id=personality_id,
         )
     except Exception as e:
         logger.error(f"Failed to start session: {e}")
 
+    # Helper to build LLM context with conversation history
+    def _build_llm_context(user_text: str) -> List[Dict[str, str]]:
+        try:
+            convos = db_service.db_service.get_conversations(session_id=session_id)
+        except Exception:
+            convos = []
+
+        runtime = build_runtime_context()
+        user_ctx = None
+        try:
+            u = db_service.db_service.get_user(user_id) if user_id else None
+            if u:
+                user_ctx = {
+                    "name": u.name,
+                    "age": u.age,
+                    "about_you": getattr(u, "about_you", "") or "",
+                    "user_type": u.user_type,
+                }
+        except Exception:
+            user_ctx = None
+
+        behavior_constraints = (
+            "You always respond with short sentences. "
+            "Avoid punctuation like parentheses or colons that would not appear in conversational speech."
+        )
+
+        sys_prompt = build_system_prompt(
+            personality_name=getattr(personality, "name", None),
+            personality_prompt=getattr(personality, "prompt", None),
+            user_context=user_ctx,
+            runtime=runtime,
+            extra_system_prompt=behavior_constraints,
+        )
+
+        history_msgs: List[Dict[str, str]] = []
+        for c in convos:
+            if c.role == "user":
+                history_msgs.append({"role": "user", "content": c.transcript})
+            elif c.role == "ai":
+                history_msgs.append({"role": "assistant", "content": c.transcript})
+
+        return build_llm_messages(
+            system_prompt=sys_prompt,
+            history=history_msgs,
+            user_text=user_text,
+            max_history_messages=30,
+        )
+
+    # Get volume setting
+    volume = 70
     try:
-        await websocket.send_text(json.dumps({"type": "session_started", "session_id": session_id}))
+        raw = db_service.db_service.get_setting("laptop_volume")
+        if raw is not None:
+            volume = int(raw)
     except Exception:
         pass
+    
+    # ESP32-specific: Send auth message and initial greeting
+    if is_esp32:
+        try:
+            await websocket.send_json({
+                "type": "auth",
+                "volume_control": volume,
+                "pitch_factor": 1.0,
+                "is_ota": False,
+                "is_reset": False
+            })
+        except Exception:
+            return
+        
+        logger.info(f"{client_label} Client connected, session={session_id}")
+        
+        # Initial greeting for ESP32
+        cancel_event = asyncio.Event()
+        try:
+            greeting_user_text = "[System] The device just connected. Greet the user with a short friendly sentence (under 8 words)."
+            greeting_messages = _build_llm_context(greeting_user_text)
+            greeting_text = await pipeline.generate_response(
+                greeting_user_text, messages=greeting_messages, max_tokens=50
+            )
+            greeting_text = greeting_text.strip() or "Hello!"
+            
+            try:
+                await websocket.send_json({"type": "server", "msg": "RESPONSE.CREATED", "volume_control": volume})
+            except Exception:
+                pass
 
+            ref_audio_path = _resolve_voice_ref_audio_path(getattr(personality, "voice_id", None))
+            
+            # Encode to Opus and send to ESP32
+            opus_packets = []
+            opus = create_opus_packetizer(lambda pkt: opus_packets.append(pkt))
+            
+            async for audio_chunk in pipeline.synthesize_speech(greeting_text, ref_audio_path=ref_audio_path):
+                opus.push(audio_chunk)
+                while opus_packets:
+                    try:
+                        await websocket.send_bytes(opus_packets.pop(0))
+                    except Exception:
+                        break
+            
+            opus.flush(pad_final_frame=True)
+            while opus_packets:
+                try:
+                    await websocket.send_bytes(opus_packets.pop(0))
+                except Exception:
+                    break
+            opus.close()
+
+            try:
+                await websocket.send_json({"type": "server", "msg": "RESPONSE.COMPLETE"})
+            except Exception:
+                pass
+
+            try:
+                db_service.db_service.log_conversation(role="ai", transcript=greeting_text, session_id=session_id)
+            except Exception:
+                pass
+        except Exception as e:
+            logger.error(f"{client_label} Greeting generation failed: {e}")
+    else:
+        # Desktop: Send session started
+        try:
+            await websocket.send_text(json.dumps({"type": "session_started", "session_id": session_id}))
+        except Exception:
+            pass
+        logger.info(f"{client_label} Client connected, session={session_id}")
+
+    # Common state
     audio_buffer = bytearray()
     cancel_event = asyncio.Event()
     current_tts_task = None
     ws_open = True
-    
-    # Session state
     session_system_prompt = None
     session_voice = "dave"
 
-    # Prebuffer to avoid initial underrun/garble
+    # VAD setup for ESP32
+    if is_esp32:
+        vad = webrtcvad.Vad(3)
+        input_sample_rate = 16000
+        vad_frame_ms = 30
+        vad_frame_bytes = int(input_sample_rate * vad_frame_ms / 1000) * 2
+        speech_frames = []
+        is_speaking = False
+        silence_count = 0
+        SILENCE_FRAMES = int(1.5 / (vad_frame_ms / 1000))  # 1.5s of silence
+    
+    # Desktop prebuffer settings
     PREBUFFER_MS = 300
     PREBUFFER_BYTES = int(pipeline.output_sample_rate * (PREBUFFER_MS / 1000.0) * 2)
 
+    async def process_transcription_and_respond(transcription: str, for_esp32: bool):
+        """Common logic for processing transcription and generating response."""
+        nonlocal cancel_event, personality, ws_open, volume
+        
+        if not transcription or not transcription.strip():
+            return
+        
+        logger.info(f"{client_label} Transcript: {transcription}")
+        
+        # Send transcription acknowledgment
+        if for_esp32:
+            try:
+                await websocket.send_json({"type": "server", "msg": "AUDIO.COMMITTED"})
+            except Exception:
+                return
+        else:
+            try:
+                await websocket.send_text(json.dumps({"type": "transcription", "text": transcription}))
+            except Exception:
+                return
+
+        # Build LLM context BEFORE logging the user message to avoid duplicate
+        cancel_event.clear()
+        llm_messages = _build_llm_context(transcription)
+        
+        # Now log the user conversation
+        try:
+            db_service.db_service.log_conversation(
+                role="user", transcript=transcription, session_id=session_id
+            )
+        except Exception as e:
+            logger.error(f"Failed to log user conversation: {e}")
+        
+        # Generate LLM response
+        full_response = await pipeline.generate_response(
+            transcription, messages=llm_messages
+        )
+        
+        if cancel_event.is_set() or not ws_open or not full_response.strip():
+            return
+        
+        logger.info(f"{client_label} LLM response: {full_response}")
+        
+        # Send response notification
+        if for_esp32:
+            try:
+                await websocket.send_json({
+                    "type": "server",
+                    "msg": "RESPONSE.CREATED",
+                    "volume_control": volume
+                })
+            except Exception:
+                return
+        else:
+            try:
+                await websocket.send_text(json.dumps({"type": "response", "text": full_response}))
+            except Exception:
+                return
+        
+        # Log AI response
+        try:
+            db_service.db_service.log_conversation(
+                role="ai", transcript=full_response, session_id=session_id
+            )
+        except Exception as e:
+            logger.error(f"Failed to log AI conversation: {e}")
+
+        # Stream TTS audio
+        ref_audio_path = _resolve_voice_ref_audio_path(getattr(personality, "voice_id", None))
+        
+        if for_esp32:
+            # ESP32: Encode to Opus and send binary
+            opus_packets = []
+            opus = create_opus_packetizer(lambda pkt: opus_packets.append(pkt))
+            
+            async for audio_chunk in pipeline.synthesize_speech(
+                full_response,
+                cancel_event,
+                ref_audio_path=ref_audio_path,
+            ):
+                if cancel_event.is_set() or not ws_open:
+                    break
+                opus.push(audio_chunk)
+                while opus_packets:
+                    try:
+                        await websocket.send_bytes(opus_packets.pop(0))
+                    except Exception:
+                        cancel_event.set()
+                        break
+            
+            opus.flush(pad_final_frame=True)
+            while opus_packets:
+                try:
+                    await websocket.send_bytes(opus_packets.pop(0))
+                except Exception:
+                    break
+            opus.close()
+            
+            try:
+                await websocket.send_json({"type": "server", "msg": "RESPONSE.COMPLETE"})
+            except Exception:
+                pass
+        else:
+            # Desktop: Send base64-encoded audio with prebuffering
+            buffered = bytearray()
+            started = False
+
+            async for audio_chunk in pipeline.synthesize_speech(
+                full_response,
+                cancel_event,
+                ref_audio_path=ref_audio_path,
+            ):
+                if cancel_event.is_set() or not ws_open:
+                    break
+
+                if not started:
+                    buffered.extend(audio_chunk)
+                    if len(buffered) < PREBUFFER_BYTES:
+                        continue
+
+                    try:
+                        await websocket.send_text(
+                            json.dumps({
+                                "type": "audio",
+                                "data": base64.b64encode(bytes(buffered)).decode("utf-8"),
+                            })
+                        )
+                    except Exception:
+                        break
+                    buffered.clear()
+                    started = True
+                else:
+                    try:
+                        await websocket.send_text(
+                            json.dumps({
+                                "type": "audio",
+                                "data": base64.b64encode(audio_chunk).decode("utf-8"),
+                            })
+                        )
+                    except Exception:
+                        break
+
+            # Flush remaining buffered audio
+            if buffered:
+                try:
+                    await websocket.send_text(
+                        json.dumps({
+                            "type": "audio",
+                            "data": base64.b64encode(bytes(buffered)).decode("utf-8"),
+                        })
+                    )
+                except Exception:
+                    pass
+
+            try:
+                await websocket.send_text(json.dumps({"type": "audio_end"}))
+            except Exception:
+                pass
+
     try:
         while True:
-            data = await websocket.receive_text()
-            message = json.loads(data)
-            msg_type = message.get("type")
-
-            if msg_type == "config":
-                session_voice = message.get("voice", "dave")
-                session_system_prompt = message.get("system_prompt")
-                logger.info(f"Config updated: voice={session_voice}, prompt_len={len(session_system_prompt) if session_system_prompt else 0}")
-
-            elif msg_type == "audio":
-                audio_data = base64.b64decode(message["data"])
-                audio_buffer.extend(audio_data)
-
-                # If user is speaking while we're TTS-ing, cancel current TTS
-                if current_tts_task and not current_tts_task.done():
-                    cancel_event.set()
+            try:
+                message = await websocket.receive()
+            except Exception:
+                break
+            
+            if message.get("type") == "websocket.disconnect":
+                break
+            
+            if is_esp32:
+                # ESP32: Handle binary audio with VAD
+                if "bytes" in message:
+                    audio_buffer.extend(message["bytes"])
+                    
+                    # VAD processing
+                    while len(audio_buffer) >= vad_frame_bytes:
+                        frame = bytes(audio_buffer[:vad_frame_bytes])
+                        audio_buffer = audio_buffer[vad_frame_bytes:]
+                        
+                        is_speech = vad.is_speech(frame, input_sample_rate)
+                        
+                        if is_speech:
+                            if not is_speaking:
+                                is_speaking = True
+                                logger.info(f"{client_label} Speech started")
+                            speech_frames.append(frame)
+                            silence_count = 0
+                        elif is_speaking:
+                            speech_frames.append(frame)
+                            silence_count += 1
+                            
+                            if silence_count > SILENCE_FRAMES:
+                                is_speaking = False
+                                logger.info(f"{client_label} Speech ended, processing...")
+                                
+                                # Combine and transcribe
+                                full_audio = b"".join(speech_frames)
+                                speech_frames = []
+                                silence_count = 0
+                                
+                                transcription = await pipeline.transcribe(full_audio)
+                                await process_transcription_and_respond(transcription, for_esp32=True)
+                
+                # ESP32: Handle JSON messages (manual end_of_speech, interrupts)
+                elif "text" in message:
                     try:
-                        await current_tts_task
-                    except asyncio.CancelledError:
-                        pass
-                    cancel_event.clear()
-                    current_tts_task = None
-
-            elif msg_type == "end_of_speech":
-                if audio_buffer:
-                    logger.info("Processing audio...")
-                    try:
-                        convos = db_service.db_service.get_conversations(session_id=session_id)
+                        data = json.loads(message["text"])
+                        msg_type = data.get("type")
+                        
+                        if msg_type == "instruction":
+                            msg = data.get("msg")
+                            if msg == "end_of_speech" and speech_frames:
+                                # Manual end of speech trigger
+                                is_speaking = False
+                                full_audio = b"".join(speech_frames)
+                                speech_frames = []
+                                silence_count = 0
+                                transcription = await pipeline.transcribe(full_audio)
+                                await process_transcription_and_respond(transcription, for_esp32=True)
+                            elif msg == "INTERRUPT":
+                                # Cancel current TTS
+                                cancel_event.set()
+                                speech_frames = []
+                                audio_buffer.clear()
+                        
+                        if "system_prompt" in data:
+                            session_system_prompt = data["system_prompt"]
                     except Exception:
-                        convos = []
+                        pass
+            else:
+                # Desktop: Handle JSON messages
+                if "text" in message:
+                    try:
+                        data = json.loads(message["text"])
+                        msg_type = data.get("type")
+                        
+                        if msg_type == "config":
+                            session_voice = data.get("voice", "dave")
+                            session_system_prompt = data.get("system_prompt")
+                            logger.info(f"Config updated: voice={session_voice}, prompt_len={len(session_system_prompt) if session_system_prompt else 0}")
+                        
+                        elif msg_type == "audio":
+                            audio_data = base64.b64decode(data["data"])
+                            audio_buffer.extend(audio_data)
 
-                    transcription = await pipeline.transcribe(bytes(audio_buffer))
-                    audio_buffer.clear()
-
-                    if transcription:
-                        logger.info(f"Transcribed: {transcription}")
-                        try:
-                            db_service.db_service.log_conversation(role="user", transcript=transcription, session_id=session_id)
-                        except Exception as e:
-                            logger.error(f"Failed to log user conversation: {e}")
-
-                        try:
-                            await websocket.send_text(
-                                json.dumps({"type": "transcription", "text": transcription})
-                            )
-                        except Exception:
-                            break
-
-                        cancel_event.clear()
-                        runtime = build_runtime_context()
-                        personality = None
-                        if personality_id:
-                            try:
-                                personality = db_service.db_service.get_personality(personality_id)
-                            except Exception:
-                                personality = None
-
-                        user_ctx = None
-                        try:
-                            u = db_service.db_service.get_user(user_id) if user_id else None
-                            if u:
-                                user_ctx = {
-                                    "name": u.name,
-                                    "age": u.age,
-                                    "about_you": getattr(u, "about_you", "") or "",
-                                    "user_type": u.user_type,
-                                }
-                        except Exception:
-                            user_ctx = None
-
-                        behavior_constraints = (
-                            "You always respond with short sentences. "
-                            "Avoid punctuation like parentheses or colons that would not appear in conversational speech."
-                        )
-
-                        sys_prompt = build_system_prompt(
-                            personality_name=getattr(personality, "name", None),
-                            personality_prompt=getattr(personality, "prompt", None),
-                            user_context=user_ctx,
-                            runtime=runtime,
-                            extra_system_prompt=("\n\n".join([p for p in [session_system_prompt, behavior_constraints] if p])),
-                        )
-
-                        history_msgs: List[Dict[str, str]] = []
-                        for c in convos:
-                            if c.role == "user":
-                                history_msgs.append({"role": "user", "content": c.transcript})
-                            elif c.role == "ai":
-                                history_msgs.append({"role": "assistant", "content": c.transcript})
-
-                        llm_messages = build_llm_messages(
-                            system_prompt=sys_prompt,
-                            history=history_msgs,
-                            user_text=transcription,
-                            max_history_messages=30,
-                        )
-                        async def stream_response():
-                            if cancel_event.is_set() or not ws_open:
-                                return
-
-                            # Generate full LLM response
-                            full_response = await pipeline.generate_response(
-                                transcription, messages=llm_messages
-                            )
-
-                            if cancel_event.is_set() or not ws_open or not full_response.strip():
-                                return
-
-                            logger.info(f"LLM response: {full_response}")
-
-                            # Send text response
-                            try:
-                                await websocket.send_text(
-                                    json.dumps({"type": "response", "text": full_response})
-                                )
-                            except Exception:
-                                return
-
-                            # Log conversation
-                            try:
-                                db_service.db_service.log_conversation(
-                                    role="ai", transcript=full_response, session_id=session_id
-                                )
-                            except Exception as e:
-                                logger.error(f"Failed to log ai conversation: {e}")
-
-                            # Stream TTS audio with prebuffering
-                            buffered = bytearray()
-                            started = False
-
-                            async for audio_chunk in pipeline.synthesize_speech(
-                                full_response,
-                                cancel_event,
-                                ref_audio_path=_resolve_voice_ref_audio_path(getattr(personality, "voice_id", None)),
-                            ):
-                                if cancel_event.is_set() or not ws_open:
-                                    break
-
-                                if not started:
-                                    buffered.extend(audio_chunk)
-                                    if len(buffered) < PREBUFFER_BYTES:
-                                        continue
-
-                                    try:
-                                        await websocket.send_text(
-                                            json.dumps({
-                                                "type": "audio",
-                                                "data": base64.b64encode(bytes(buffered)).decode("utf-8"),
-                                            })
-                                        )
-                                    except Exception:
-                                        break
-                                    buffered.clear()
-                                    started = True
-                                else:
-                                    try:
-                                        await websocket.send_text(
-                                            json.dumps({
-                                                "type": "audio",
-                                                "data": base64.b64encode(audio_chunk).decode("utf-8"),
-                                            })
-                                        )
-                                    except Exception:
-                                        break
-
-                            # Flush remaining buffered audio
-                            if buffered:
+                            # If user is speaking while we're TTS-ing, cancel current TTS
+                            if current_tts_task and not current_tts_task.done():
+                                cancel_event.set()
                                 try:
-                                    await websocket.send_text(
-                                        json.dumps({
-                                            "type": "audio",
-                                            "data": base64.b64encode(bytes(buffered)).decode("utf-8"),
-                                        })
-                                    )
-                                except Exception:
+                                    await current_tts_task
+                                except asyncio.CancelledError:
                                     pass
-
-                            try:
-                                await websocket.send_text(json.dumps({"type": "audio_end"}))
-                            except Exception:
-                                pass
-
-                        current_tts_task = asyncio.create_task(stream_response())
-
-            elif msg_type == "cancel":
-                if current_tts_task and not current_tts_task.done():
-                    cancel_event.set()
-                audio_buffer.clear()
-
+                                cancel_event.clear()
+                                current_tts_task = None
+                        
+                        elif msg_type == "end_of_speech":
+                            if audio_buffer:
+                                logger.info("Processing audio...")
+                                transcription = await pipeline.transcribe(bytes(audio_buffer))
+                                audio_buffer.clear()
+                                
+                                if transcription and transcription.strip():
+                                    current_tts_task = asyncio.create_task(
+                                        process_transcription_and_respond(transcription, for_esp32=False)
+                                    )
+                        
+                        elif msg_type == "cancel":
+                            if current_tts_task and not current_tts_task.done():
+                                cancel_event.set()
+                            audio_buffer.clear()
+                    except Exception as e:
+                        logger.error(f"Error parsing message: {e}")
+                        
     except WebSocketDisconnect:
-        ws_open = False
-        if current_tts_task and not current_tts_task.done():
-            cancel_event.set()
-            current_tts_task.cancel()
-        manager.disconnect(websocket)
-        try:
-            db_service.db_service.end_session(session_id)
-        except Exception:
-            pass
+        logger.info(f"{client_label} Disconnected")
     except Exception as e:
+        logger.error(f"{client_label} WebSocket error: {e}")
+    finally:
         ws_open = False
         if current_tts_task and not current_tts_task.done():
             cancel_event.set()
             current_tts_task.cancel()
-        logger.error(f"WebSocket error: {e}")
-        manager.disconnect(websocket)
+        if not is_esp32:
+            manager.disconnect(websocket)
         try:
             db_service.db_service.end_session(session_id)
         except Exception:
             pass
+        logger.info(f"{client_label} Session ended: {session_id}")
+
+
+# Backward compatibility: Keep /ws/esp32 as alias
+@app.websocket("/ws/esp32")
+async def websocket_esp32_compat(websocket: WebSocket):
+    """Backward compatibility endpoint for ESP32. Redirects to unified /ws with esp32 client type."""
+    # Call the unified endpoint with ESP32 client type
+    await websocket_unified(websocket, client_type=CLIENT_TYPE_ESP32)
 
 
 def main():

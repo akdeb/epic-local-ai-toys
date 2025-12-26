@@ -13,7 +13,7 @@ interface SetupStatus {
   deps_installed: boolean;
 }
 
-type SetupStep = "checking" | "no-python" | "creating-venv" | "installing-deps" | "complete";
+type SetupStep = "checking" | "creating-venv" | "installing-deps" | "complete";
 
 export const SetupPage = () => {
   const navigate = useNavigate();
@@ -41,9 +41,7 @@ export const SetupPage = () => {
       const result = await invoke<SetupStatus>("check_setup_status");
       setStatus(result);
 
-      if (!result.python_installed) {
-        setStep("no-python");
-      } else if (result.deps_installed) {
+      if (result.deps_installed) {
         setStep("complete");
       } else if (result.venv_exists) {
         setStep("installing-deps");
@@ -60,7 +58,7 @@ export const SetupPage = () => {
     try {
       setError(null);
       setStep("creating-venv");
-      setProgress("Creating Python virtual environment...");
+      setProgress("Downloading Python runtime (first time only)...");
       await invoke("create_python_venv");
 
       setStep("installing-deps");
@@ -128,49 +126,18 @@ export const SetupPage = () => {
             Environment Setup
           </div>
 
-          {step === "no-python" ? (
-            <div className="space-y-4">
-              <div className="bg-red-50 border border-red-200 rounded-xl p-4">
-                <div className="font-bold text-red-700 mb-2">Python 3.11+ Required</div>
-                <p className="text-sm text-red-600">
-                  This app requires Python 3.11 or later to run the AI models.
-                </p>
+          <div className="space-y-2">
+            {renderStepIndicator(
+              "Download Python runtime",
+              step === "checking" || step === "creating-venv",
+              (status?.venv_exists || step === "installing-deps" || step === "complete") ?? false,
+              false
+            )}
+            {status?.python_version && (
+              <div className="ml-8 text-xs text-gray-500 font-mono -mt-1 mb-2">
+                {status.python_version}
               </div>
-              <div className="text-sm text-gray-600 space-y-2">
-                <p className="font-medium">Install Python using one of these methods:</p>
-                <ul className="list-disc list-inside space-y-1 ml-2">
-                  <li>
-                    <a
-                      href="https://www.python.org/downloads/"
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="text-blue-600 underline"
-                    >
-                      python.org
-                    </a>
-                  </li>
-                  <li>
-                    Homebrew: <code className="bg-gray-100 px-1 rounded">brew install python@3.11</code>
-                  </li>
-                </ul>
-              </div>
-              <button className="retro-btn w-full" onClick={checkStatus}>
-                Check Again
-              </button>
-            </div>
-          ) : (
-            <div className="space-y-2">
-              {renderStepIndicator(
-                "Check Python installation",
-                step === "checking",
-                status?.python_installed ?? false,
-                false
-              )}
-              {status?.python_version && (
-                <div className="ml-8 text-xs text-gray-500 font-mono -mt-1 mb-2">
-                  {status.python_version}
-                </div>
-              )}
+            )}
               {renderStepIndicator(
                 "Create virtual environment",
                 step === "creating-venv",
@@ -211,8 +178,7 @@ export const SetupPage = () => {
                   </button>
                 </div>
               )}
-            </div>
-          )}
+          </div>
         </div>
 
         <div className="mt-6 text-center text-xs text-gray-500 font-mono opacity-60">

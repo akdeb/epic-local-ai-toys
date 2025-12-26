@@ -26,6 +26,7 @@ dependencies = [
     "huggingface-hub==1.2.3",
     "esptool==5.1.0",
     "pyserial==3.5",
+    "av>=16.0.0",
 ]
 
 [project.optional-dependencies]

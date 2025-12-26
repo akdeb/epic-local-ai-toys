@@ -82,6 +82,7 @@ export const VoiceWsProvider = ({ children }: { children: React.ReactNode }) => 
     const u = new URL(base);
     u.protocol = u.protocol === "https:" ? "wss:" : "ws:";
     u.pathname = "/ws";
+    u.searchParams.set("client_type", "desktop");
     return u.toString();
   }, []);
 

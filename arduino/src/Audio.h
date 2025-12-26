@@ -45,7 +45,7 @@ extern volatile bool i2sInputFlushScheduled;
 
 // WEBSOCKET
 void webSocketEvent(WStype_t type, uint8_t *payload, size_t length);
-void websocketSetup(String server_domain, int port, String path);
+void websocketSetup(const String& server_domain, int port, const String& path);
 void networkTask(void *parameter);
 
 // AUDIO OUTPUT
