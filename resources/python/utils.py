@@ -1,4 +1,5 @@
 import io
+import os
 import struct
 from typing import Callable, Optional
 import numpy as np
@@ -10,7 +11,7 @@ TTS = "mlx-community/chatterbox-turbo-4bit"
 # Audio constants matching ESP32 expectations
 OPUS_SAMPLE_RATE = 24000  # 24kHz for TTS output
 OPUS_CHANNELS = 1  # Mono
-OPUS_FRAME_DURATION_MS = 120  # Frame duration in ms (same as Deno relay)
+OPUS_FRAME_DURATION_MS = 120  # Frame duration in ms (matches working Deno config)
 OPUS_BYTES_PER_SAMPLE = 2  # 16-bit PCM
 # Frame size in SAMPLES
 OPUS_FRAME_SAMPLES = OPUS_SAMPLE_RATE * OPUS_FRAME_DURATION_MS // 1000  # 2880 samples
@@ -39,13 +40,46 @@ class OpusPacketizer:
             self._codec = av.Codec('libopus', 'w')
             self._codec_ctx = av.CodecContext.create(self._codec)
             self._codec_ctx.sample_rate = self.sample_rate
-            self._codec_ctx.channels = OPUS_CHANNELS
-            self._codec_ctx.format = av.AudioFormat('s16')
+            # Set layout first - this implicitly sets channels (channels is read-only in newer PyAV)
             self._codec_ctx.layout = 'mono'
-            # Set frame size to match our expected duration
-            self._codec_ctx.frame_size = OPUS_FRAME_SAMPLES
+            self._codec_ctx.format = av.AudioFormat('s16')
+            # frame_size is read-only in newer PyAV; we control it by the size of frames we pass
+            self._codec_ctx.bit_rate = 24000  # Match Deno: 24kbps
+            
+            # Set application type to VOIP (2048)
+            # This is critical for speech optimization
+            try:
+                if hasattr(self._codec_ctx, "options"):
+                    self._codec_ctx.options = {
+                        "application": "voip",
+                        "frame_duration": "120",  # Request 120ms frames explicitly
+                        "complexity": "10",       # Max quality
+                        "vbr": "constrained",     # Constrained VBR usually best for streaming
+                    }
+            except Exception:
+                pass
+
             self._codec_ctx.open()
         return self._codec_ctx
+
+    def _encode_frame(self, frame_bytes: bytes) -> None:
+        try:
+            import av
+            encoder = self._get_encoder()
+            samples = np.frombuffer(frame_bytes, dtype=np.int16)
+            frame = av.AudioFrame.from_ndarray(
+                samples.reshape(1, -1),  # (channels, samples)
+                format='s16',
+                layout='mono'
+            )
+            frame.sample_rate = self.sample_rate
+            frame.pts = None
+
+            for packet in encoder.encode(frame):
+                if packet.size > 0:
+                    self.send_packet(bytes(packet))
+        except Exception as e:
+            print(f"Opus encode failed: {e}")
 
     def push(self, pcm: bytes) -> None:
         """Add PCM bytes to the buffer and encode complete frames."""
@@ -54,30 +88,12 @@ class OpusPacketizer:
 
         self.pending.extend(pcm)
 
-        import av
-        encoder = self._get_encoder()
-
         while len(self.pending) >= OPUS_FRAME_SIZE:
             frame_bytes = bytes(self.pending[:OPUS_FRAME_SIZE])
             self.pending = self.pending[OPUS_FRAME_SIZE:]
             
             try:
-                # Convert bytes to numpy array (int16)
-                samples = np.frombuffer(frame_bytes, dtype=np.int16)
-                
-                # Create an AudioFrame
-                frame = av.AudioFrame.from_ndarray(
-                    samples.reshape(1, -1),  # (channels, samples)
-                    format='s16',
-                    layout='mono'
-                )
-                frame.sample_rate = self.sample_rate
-                frame.pts = None
-                
-                # Encode
-                for packet in encoder.encode(frame):
-                    if packet.size > 0:
-                        self.send_packet(bytes(packet))
+                self._encode_frame(frame_bytes)
             except Exception as e:
                 print(f"Opus encode failed: {e}")
 
@@ -85,8 +101,6 @@ class OpusPacketizer:
         """Flush remaining audio. If pad_final_frame, pad and encode the last partial frame."""
         if self.closed:
             return
-
-        import av
         
         if self.pending and pad_final_frame:
             # Pad the final frame with silence
@@ -95,19 +109,7 @@ class OpusPacketizer:
             self.pending.clear()
 
             try:
-                encoder = self._get_encoder()
-                samples = np.frombuffer(bytes(padded), dtype=np.int16)
-                frame = av.AudioFrame.from_ndarray(
-                    samples.reshape(1, -1),
-                    format='s16',
-                    layout='mono'
-                )
-                frame.sample_rate = self.sample_rate
-                frame.pts = None
-                
-                for packet in encoder.encode(frame):
-                    if packet.size > 0:
-                        self.send_packet(bytes(packet))
+                self._encode_frame(bytes(padded))
             except Exception as e:
                 print(f"Opus encode failed: {e}")
         else:

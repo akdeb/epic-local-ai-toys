@@ -82,69 +82,18 @@ fn get_bootstrap_python(app: &AppHandle) -> PathBuf {
     bin.join("python3")
 }
 
-async fn resolve_bootstrap_python_url() -> Result<String, String> {
+// Hardcoded URL for CPython 3.11 on Apple Silicon.
+// We skip the GitHub API entirely to avoid network issues (504 timeout, rate limiting, etc.)
+const PYTHON_URL: &str = "https://github.com/astral-sh/python-build-standalone/releases/download/20251217/cpython-3.11.14%2B20251217-aarch64-apple-darwin-install_only.tar.gz";
+
+fn resolve_bootstrap_python_url() -> String {
     // Allow overriding the URL in case we need to hotfix.
     if let Ok(url) = env::var("ELATO_BOOTSTRAP_PYTHON_URL") {
         if !url.trim().is_empty() {
-            return Ok(url);
+            return url;
         }
     }
-
-    // Apple Silicon only: resolve a CPython 3.11 macOS aarch64 install_only tarball.
-    // We intentionally do NOT use `releases/latest` because the latest tag may not include CPython 3.11.
-    let api_url = "https://api.github.com/repos/astral-sh/python-build-standalone/releases?per_page=20";
-    let client = reqwest::Client::new();
-    let resp = client
-        .get(api_url)
-        .header("User-Agent", "elato-ui")
-        .send()
-        .await
-        .map_err(|e| format!("Failed to query python-build-standalone releases: {e}"))?;
-
-    if !resp.status().is_success() {
-        return Err(format!(
-            "Failed to query python-build-standalone releases: HTTP {}",
-            resp.status()
-        ));
-    }
-
-    let body = resp
-        .text()
-        .await
-        .map_err(|e| format!("Failed to read python-build-standalone releases response: {e}"))?;
-    let v: serde_json::Value =
-        serde_json::from_str(&body).map_err(|e| format!("Failed to parse releases JSON: {e}"))?;
-
-    let releases = v
-        .as_array()
-        .ok_or_else(|| "python-build-standalone releases JSON was not a list".to_string())?;
-
-    for rel in releases {
-        let assets = match rel.get("assets").and_then(|a| a.as_array()) {
-            Some(a) => a,
-            None => continue,
-        };
-
-        for asset in assets {
-            let name = asset.get("name").and_then(|n| n.as_str()).unwrap_or("");
-            // Example name:
-            // cpython-3.11.10+20241016-aarch64-apple-darwin-install_only.tar.gz
-            if name.starts_with("cpython-3.11")
-                && name.contains("aarch64-apple-darwin")
-                && name.ends_with("install_only.tar.gz")
-            {
-                let url = asset
-                    .get("browser_download_url")
-                    .and_then(|u| u.as_str())
-                    .ok_or_else(|| {
-                        "python-build-standalone asset missing browser_download_url".to_string()
-                    })?;
-                return Ok(url.to_string());
-            }
-        }
-    }
-
-    Err("No matching CPython 3.11 aarch64 macOS install_only asset found in recent python-build-standalone releases. Set ELATO_BOOTSTRAP_PYTHON_URL explicitly.".to_string())
+    PYTHON_URL.to_string()
 }
 
 async fn bootstrap_python_if_needed(app: &AppHandle) -> Result<PathBuf, String> {
@@ -161,7 +110,7 @@ async fn bootstrap_python_if_needed(app: &AppHandle) -> Result<PathBuf, String> 
     let root = get_bootstrap_python_root(app);
     fs::create_dir_all(&root).map_err(|e| e.to_string())?;
 
-    let url = resolve_bootstrap_python_url().await?;
+    let url = resolve_bootstrap_python_url();
 
     let client = reqwest::Client::new();
     let resp = client
@@ -766,7 +715,62 @@ async fn mark_setup_complete(app: AppHandle) -> Result<(), String> {
 async fn is_first_launch(app: AppHandle) -> Result<bool, String> {
     let elato_dir = get_elato_dir(&app);
     let marker_file = elato_dir.join(".setup_complete");
-    Ok(!marker_file.exists())
+    let venv_python = get_venv_python(&app);
+    
+    // Consider it first launch if marker doesn't exist OR if venv doesn't exist
+    // This handles the case where setup was interrupted
+    Ok(!marker_file.exists() || !venv_python.exists())
+}
+
+#[tauri::command]
+async fn start_backend(app: AppHandle) -> Result<String, String> {
+    // Check if server is already running
+    if TcpStream::connect_timeout(&"127.0.0.1:8000".parse().unwrap(), Duration::from_millis(100)).is_ok() {
+        return Ok("Backend already running".to_string());
+    }
+
+    let venv_python = get_venv_python(&app);
+    if !venv_python.exists() {
+        return Err("Python environment not ready".to_string());
+    }
+
+    let python_dir = {
+        let resource_dir = app.path().resource_dir().ok();
+        let bundled_path = resource_dir.as_ref().map(|r| r.join("python"));
+        if bundled_path.as_ref().map(|p| p.exists()).unwrap_or(false) {
+            bundled_path.unwrap()
+        } else {
+            let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+            manifest_dir.parent().unwrap().parent().unwrap().join("resources").join("python")
+        }
+    };
+
+    let elato_db_path = get_elato_dir(&app).join("elato.db");
+    let elato_voices_dir = get_voices_dir(&app);
+
+    ensure_port_free(8000);
+
+    let child = Command::new(&venv_python)
+        .arg("-m")
+        .arg("uvicorn")
+        .arg("server:app")
+        .arg("--host")
+        .arg("0.0.0.0")
+        .arg("--port")
+        .arg("8000")
+        .current_dir(&python_dir)
+        .env("ELATO_DB_PATH", elato_db_path.to_string_lossy().to_string())
+        .env("ELATO_VOICES_DIR", elato_voices_dir.to_string_lossy().to_string())
+        .env("TOKENIZERS_PARALLELISM", "false")
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .map_err(|e| format!("Failed to start backend: {e}"))?;
+
+    println!("[TAURI] Backend started after setup (PID: {})", child.id());
+    app.manage(ApiProcess(Mutex::new(Some(child))));
+
+    Ok("Backend started".to_string())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -858,7 +862,8 @@ pub fn run() {
             download_all_models,
             get_setup_complete,
             mark_setup_complete,
-            is_first_launch
+            is_first_launch,
+            start_backend
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

@@ -6,8 +6,9 @@ from mlx_audio.tts.utils import load_model as load_tts
 class ChatterboxTTS:
     """Chatterbox Turbo TTS backend with voice cloning support."""
 
-    # Chunk size in samples (~100ms at 24kHz = 2400 samples)
-    CHUNK_SAMPLES = 2400
+    # Chunk size in samples (120ms at 24kHz = 2880 samples)
+    # This MUST match the Opus frame size (OPUS_FRAME_SAMPLES in utils.py)
+    CHUNK_SAMPLES = 2880
 
     def __init__(
         self,

@@ -76,6 +76,7 @@ export const SetupPage = () => {
       setError(null);
       setProgress("Installing dependencies...");
       await invoke("install_python_deps");
+
       setStep("complete");
     } catch (e: any) {
       setError(e?.message || String(e));

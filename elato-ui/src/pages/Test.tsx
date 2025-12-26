@@ -19,11 +19,11 @@ export const TestPage = () => {
         : "bg-[#ffd400]";
 
   const micStatusLabel = useMemo(() => {
-    if (!voiceWs.isRecording) return null;
-    if (voiceWs.isPaused) return "paused";
-    if (voiceWs.isSpeaking) return "paused";
+    if (voiceWs.isSpeaking) return "speaking";
+    if (!voiceWs.isRecording) return voiceWs.status === "connected" ? "waiting" : null;
+    if (voiceWs.isPaused) return "processing";
     return "listening";
-  }, [voiceWs.isRecording, voiceWs.isPaused, voiceWs.isSpeaking]);
+  }, [voiceWs.isRecording, voiceWs.isPaused, voiceWs.isSpeaking, voiceWs.status]);
 
   const orbScale = useMemo(() => {
     const base = voiceWs.isRecording ? 1.03 : 1;
@@ -43,7 +43,7 @@ export const TestPage = () => {
           <div className="mt-1 font-mono text-xs text-gray-600 inline-flex items-center gap-2">
             <span className={`w-2.5 h-2.5 rounded-full border border-black ${statusDotClass}`} />
             <span className="capitalize">{voiceWs.status}</span>
-            {voiceWs.isRecording && (
+            {micStatusLabel && (
               <span className="text-gray-500">
                 • {micStatusLabel}
               </span>

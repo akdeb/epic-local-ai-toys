@@ -877,7 +877,7 @@ async def websocket_unified(websocket: WebSocket, client_type: str = Query(defau
         )
 
     # Get volume setting
-    volume = 70
+    volume = 100
     try:
         raw = db_service.db_service.get_setting("laptop_volume")
         if raw is not None:
@@ -885,7 +885,7 @@ async def websocket_unified(websocket: WebSocket, client_type: str = Query(defau
     except Exception:
         pass
     
-    # ESP32-specific: Send auth message and initial greeting
+    # Send auth/session message
     if is_esp32:
         try:
             await websocket.send_json({
@@ -897,27 +897,35 @@ async def websocket_unified(websocket: WebSocket, client_type: str = Query(defau
             })
         except Exception:
             return
-        
-        logger.info(f"{client_label} Client connected, session={session_id}")
-        
-        # Initial greeting for ESP32
-        cancel_event = asyncio.Event()
+    else:
         try:
-            greeting_user_text = "[System] The device just connected. Greet the user with a short friendly sentence (under 8 words)."
-            greeting_messages = _build_llm_context(greeting_user_text)
-            greeting_text = await pipeline.generate_response(
-                greeting_user_text, messages=greeting_messages, max_tokens=50
-            )
-            greeting_text = greeting_text.strip() or "Hello!"
-            
+            await websocket.send_text(json.dumps({"type": "session_started", "session_id": session_id}))
+        except Exception:
+            pass
+    
+    logger.info(f"{client_label} Client connected, session={session_id}")
+    
+    # Generate and send initial greeting (speak first, then listen)
+    cancel_event = asyncio.Event()
+    try:
+        greeting_user_text = "[System] The user just connected. Greet them with a short friendly sentence (under 8 words)."
+        greeting_messages = _build_llm_context(greeting_user_text)
+        greeting_text = await pipeline.generate_response(
+            greeting_user_text, messages=greeting_messages, max_tokens=50
+        )
+        greeting_text = greeting_text.strip() or "Hello!"
+        
+        logger.info(f"{client_label} Greeting: {greeting_text}")
+        
+        ref_audio_path = _resolve_voice_ref_audio_path(getattr(personality, "voice_id", None))
+        
+        if is_esp32:
+            # ESP32: Send RESPONSE.CREATED, then Opus audio, then RESPONSE.COMPLETE
             try:
                 await websocket.send_json({"type": "server", "msg": "RESPONSE.CREATED", "volume_control": volume})
             except Exception:
                 pass
 
-            ref_audio_path = _resolve_voice_ref_audio_path(getattr(personality, "voice_id", None))
-            
-            # Encode to Opus and send to ESP32
             opus_packets = []
             opus = create_opus_packetizer(lambda pkt: opus_packets.append(pkt))
             
@@ -941,20 +949,40 @@ async def websocket_unified(websocket: WebSocket, client_type: str = Query(defau
                 await websocket.send_json({"type": "server", "msg": "RESPONSE.COMPLETE"})
             except Exception:
                 pass
-
+        else:
+            # Desktop: Send response text, then base64 audio, then audio_end
             try:
-                db_service.db_service.log_conversation(role="ai", transcript=greeting_text, session_id=session_id)
+                await websocket.send_text(json.dumps({"type": "response", "text": greeting_text}))
             except Exception:
                 pass
-        except Exception as e:
-            logger.error(f"{client_label} Greeting generation failed: {e}")
-    else:
-        # Desktop: Send session started
+            
+            async for audio_chunk in pipeline.synthesize_speech(greeting_text, ref_audio_path=ref_audio_path):
+                try:
+                    await websocket.send_text(
+                        json.dumps({
+                            "type": "audio",
+                            "data": base64.b64encode(audio_chunk).decode("utf-8"),
+                        })
+                    )
+                except Exception:
+                    break
+            
+            try:
+                await websocket.send_text(json.dumps({"type": "audio_end"}))
+            except Exception:
+                pass
+
+        # Log a synthetic user message so history alternates properly (user -> assistant)
         try:
-            await websocket.send_text(json.dumps({"type": "session_started", "session_id": session_id}))
+            db_service.db_service.log_conversation(role="user", transcript="[connected]", session_id=session_id)
         except Exception:
             pass
-        logger.info(f"{client_label} Client connected, session={session_id}")
+        try:
+            db_service.db_service.log_conversation(role="ai", transcript=greeting_text, session_id=session_id)
+        except Exception:
+            pass
+    except Exception as e:
+        logger.error(f"{client_label} Greeting generation failed: {e}")
 
     # Common state
     audio_buffer = bytearray()
@@ -992,12 +1020,14 @@ async def websocket_unified(websocket: WebSocket, client_type: str = Query(defau
         if for_esp32:
             try:
                 await websocket.send_json({"type": "server", "msg": "AUDIO.COMMITTED"})
-            except Exception:
+            except Exception as e:
+                logger.error(f"{client_label} Failed to send AUDIO.COMMITTED: {e}")
                 return
         else:
             try:
                 await websocket.send_text(json.dumps({"type": "transcription", "text": transcription}))
-            except Exception:
+            except Exception as e:
+                logger.error(f"{client_label} Failed to send transcription: {e}")
                 return
 
         # Build LLM context BEFORE logging the user message to avoid duplicate
@@ -1013,11 +1043,23 @@ async def websocket_unified(websocket: WebSocket, client_type: str = Query(defau
             logger.error(f"Failed to log user conversation: {e}")
         
         # Generate LLM response
-        full_response = await pipeline.generate_response(
-            transcription, messages=llm_messages
-        )
+        logger.info(f"{client_label} Generating LLM response...")
+        try:
+            full_response = await pipeline.generate_response(
+                transcription, messages=llm_messages
+            )
+        except Exception as e:
+            logger.error(f"{client_label} LLM generation error: {e}")
+            return
         
-        if cancel_event.is_set() or not ws_open or not full_response.strip():
+        if cancel_event.is_set():
+            logger.warning(f"{client_label} Cancelled before LLM response")
+            return
+        if not ws_open:
+            logger.warning(f"{client_label} WebSocket closed before LLM response")
+            return
+        if not full_response or not full_response.strip():
+            logger.warning(f"{client_label} Empty LLM response")
             return
         
         logger.info(f"{client_label} LLM response: {full_response}")
@@ -1241,9 +1283,15 @@ async def websocket_unified(websocket: WebSocket, client_type: str = Query(defau
                                 audio_buffer.clear()
                                 
                                 if transcription and transcription.strip():
-                                    current_tts_task = asyncio.create_task(
-                                        process_transcription_and_respond(transcription, for_esp32=False)
-                                    )
+                                    async def _run_response(text: str):
+                                        try:
+                                            await process_transcription_and_respond(text, for_esp32=False)
+                                        except Exception as e:
+                                            logger.error(f"{client_label} Response task error: {e}")
+                                            import traceback
+                                            traceback.print_exc()
+                                    
+                                    current_tts_task = asyncio.create_task(_run_response(transcription))
                         
                         elif msg_type == "cancel":
                             if current_tts_task and not current_tts_task.done():

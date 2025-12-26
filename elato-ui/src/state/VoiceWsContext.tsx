@@ -155,7 +155,13 @@ export const VoiceWsProvider = ({ children }: { children: React.ReactNode }) => 
               setTimeout(() => {
                 stopTtsPlayback();
                 awaitingResumeRef.current = false;
-                resumeMic();
+                // Start recording if not already started (first time after greeting)
+                if (!autoStartedMicRef.current) {
+                  autoStartedMicRef.current = true;
+                  void startRecording();
+                } else {
+                  resumeMic();
+                }
               }, (bufferSize / ttsSampleRate) * 1000 + 50);
             }
             break;
@@ -427,11 +433,8 @@ export const VoiceWsProvider = ({ children }: { children: React.ReactNode }) => 
       } catch {
         // ignore
       }
-
-      if (!autoStartedMicRef.current) {
-        autoStartedMicRef.current = true;
-        void startRecording();
-      }
+      // Don't start recording immediately - wait for greeting to finish (audio_end)
+      // The server will send a greeting first, then we start listening
     };
 
     ws.onclose = (ev) => {
@@ -470,7 +473,13 @@ export const VoiceWsProvider = ({ children }: { children: React.ReactNode }) => 
           awaitingResumeRef.current = true;
           if (!ttsPlaybackActiveRef.current && ttsPcmQueueRef.current.length === 0) {
             awaitingResumeRef.current = false;
-            resumeMic();
+            // Start recording if not already started (first time after greeting)
+            if (!autoStartedMicRef.current) {
+              autoStartedMicRef.current = true;
+              void startRecording();
+            } else {
+              resumeMic();
+            }
           }
         } else if (msg.type === "session_started") {
           setLatestSessionId(msg.session_id || null);

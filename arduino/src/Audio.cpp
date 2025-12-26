@@ -361,7 +361,7 @@ void webSocketEvent(WStype_t type, uint8_t *payload, size_t length)
 void websocketSetup(const String& server_domain, int port, const String& path)
 {
     // Include both auth token and client type header
-    String headers = "Authorization: Bearer " + String(authTokenGlobal) + "\r\nX-Client-Type: esp32";
+    String headers = "Authorization: Bearer " + String(authTokenGlobal);
 
     xSemaphoreTake(wsMutex, portMAX_DELAY);
 

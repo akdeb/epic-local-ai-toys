@@ -146,11 +146,15 @@ export const ModelSetupPage = () => {
 
   const handleContinue = async () => {
     try {
+      setProgress("Starting backend...");
+      await invoke("start_backend");
       await invoke("mark_setup_complete");
       setError(null);
       navigate("/", { replace: true });
     } catch (e: any) {
       setError(e?.message || String(e));
+    } finally {
+      setProgress("");
     }
   };
 

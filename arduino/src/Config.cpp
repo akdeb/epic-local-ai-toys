@@ -7,7 +7,7 @@ volatile bool sleepRequested = false;
 
 const char *ws_server = "172.20.10.2";
 const uint16_t ws_port = 8000;
-const char *ws_path = "/ws";
+const char *ws_path = "/ws/esp32";
 
 String authTokenGlobal;
 volatile DeviceState deviceState = IDLE;
