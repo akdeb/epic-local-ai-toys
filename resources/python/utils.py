@@ -205,3 +205,38 @@ def get_media_type_and_filename(format: str) -> tuple[str, str]:
         "wav": ("audio/wav", "speech.wav")
     }
     return format_mapping.get(format, ("audio/wav", "speech.wav"))
+
+
+def boost_limit_pcm16le_in_place(pcm_bytes: bytearray, gain_db: float = 6.0, ceiling: float = 0.95) -> None:
+    """
+    Smart boost: Applies dynamic gain to maximize volume without clipping.
+    If the signal is already loud, gain is reduced. If quiet, gain is applied.
+    """
+    # Convert bytearray to numpy array of int16
+    audio = np.frombuffer(pcm_bytes, dtype=np.int16)
+    
+    if len(audio) == 0:
+        return
+
+    # Normalize to [-1, 1] float
+    float_audio = audio.astype(np.float32) / 32768.0
+    
+    # Calculate target gain factor
+    target_gain = 10 ** (gain_db / 20)
+    
+    # Apply gain to everything
+    amplified = float_audio * target_gain
+    
+    # Apply tanh soft-clipping
+    # tanh is linear for small inputs (x < 0.5) and asymptotically approaches 1.0 for large inputs
+    # It creates a smooth, musical overdrive without harsh edges or folding
+    y_soft = np.tanh(amplified)
+    
+    # Hard clamp to [-0.999, 0.999] just to be safe for int16 conversion
+    np.clip(y_soft, -0.999, 0.999, out=y_soft)
+    
+    # Convert back to int16
+    result_int16 = (y_soft * 32767).astype(np.int16)
+    
+    # Write back to the original bytearray
+    pcm_bytes[:] = result_int16.tobytes()

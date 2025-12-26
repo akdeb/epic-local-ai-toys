@@ -28,6 +28,7 @@ from mlx_audio.stt.models.whisper import Model as Whisper
 from tts import ChatterboxTTS
 import db_service  # DB ops exposed via HTTP endpoints
 from fastapi.middleware.cors import CORSMiddleware
+import utils
 from utils import STT, LLM, TTS, create_opus_packetizer
 
 # Client type constants
@@ -39,6 +40,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+GAIN_DB = 6.0
+CEILING = 0.89
 
 def _resolve_voice_ref_audio_path(voice_id: Optional[str]) -> Optional[str]:
     if not voice_id:
@@ -930,7 +933,9 @@ async def websocket_unified(websocket: WebSocket, client_type: str = Query(defau
             opus = create_opus_packetizer(lambda pkt: opus_packets.append(pkt))
             
             async for audio_chunk in pipeline.synthesize_speech(greeting_text, ref_audio_path=ref_audio_path):
-                opus.push(audio_chunk)
+                chunk_mutable = bytearray(audio_chunk)
+                utils.boost_limit_pcm16le_in_place(chunk_mutable, gain_db=GAIN_DB, ceiling=CEILING)
+                opus.push(chunk_mutable)
                 while opus_packets:
                     try:
                         await websocket.send_bytes(opus_packets.pop(0))
@@ -1103,7 +1108,13 @@ async def websocket_unified(websocket: WebSocket, client_type: str = Query(defau
             ):
                 if cancel_event.is_set() or not ws_open:
                     break
-                opus.push(audio_chunk)
+                
+                # Boost and limit audio (in-place)
+                # Ensure we have a mutable bytearray
+                chunk_mutable = bytearray(audio_chunk)
+                utils.boost_limit_pcm16le_in_place(chunk_mutable, gain_db=GAIN_DB, ceiling=CEILING)
+                
+                opus.push(chunk_mutable)
                 while opus_packets:
                     try:
                         await websocket.send_bytes(opus_packets.pop(0))
