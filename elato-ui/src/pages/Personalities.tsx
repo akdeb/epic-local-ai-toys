@@ -37,7 +37,14 @@ export const Personalities = () => {
 
   const { activeUserId, activeUser, refreshUsers } = useActiveUser();
 
+  const GLOBAL_PERSONALITY_IMAGE_BASE_URL = 'https://pub-a64cd21521e44c81a85db631f1cdaacc.r2.dev';
+
   const imgSrcForPersonality = (p: any) => {
+    if (p?.is_global) {
+      const personalityId = p?.id != null ? String(p.id) : '';
+      if (!personalityId) return null;
+      return `${GLOBAL_PERSONALITY_IMAGE_BASE_URL}/${encodeURIComponent(personalityId)}.png`;
+    }
     const src = typeof p?.img_src === 'string' ? p.img_src.trim() : '';
     if (!src) return null;
     if (/^https?:\/\//i.test(src)) return src;
@@ -272,10 +279,10 @@ export const Personalities = () => {
               )}
             </div>
 
-            <div className="flex flex-col items-start gap-4 pr-6">
+            <div className={`flex flex-col items-start gap-4 ${p.is_global ? '' : 'pr-6'}`}>
               {!p.is_global ? (
                 <label
-                  className={`w-full h-[100px] rounded-[14px] ${imgSrcForPersonality(p) ? 'border-2 border-[#aaa]' : 'retro-dotted'} bg-white flex items-center justify-center cursor-pointer overflow-hidden`}
+                  className={`w-full h-[100px] rounded-[14px] ${imgSrcForPersonality(p) ? 'retro-dotted' : ''} bg-white flex items-center justify-center cursor-pointer overflow-hidden`}
                   title="Upload character image"
                   onClick={(e) => e.stopPropagation()}
                   onKeyDown={(e) => {
@@ -328,7 +335,7 @@ export const Personalities = () => {
                   />
                 </label>
               ) : (
-                <div className="w-full h-[100px] rounded-[14px] retro-dotted bg-white flex items-center justify-center overflow-hidden">
+                <div className="w-full h-[100px] rounded-[14px] bg-white flex items-center justify-center overflow-hidden">
                   {imgSrcForPersonality(p) && !brokenImgByPersonalityId[String(p.id)] ? (
                     <img
                       src={imgSrcForPersonality(p) || ''}
