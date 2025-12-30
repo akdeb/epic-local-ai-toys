@@ -4,7 +4,7 @@ import { useActiveUser } from '../state/ActiveUserContext';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../api';
 import { useEffect, useState } from 'react';
-import { Bot, ShieldCheck, Sparkles, X } from 'lucide-react';
+import { Bot, ShieldCheck, Sparkles, X, RefreshCw } from 'lucide-react';
 import { VoiceWsProvider, useVoiceWs } from '../state/VoiceWsContext';
 import { invoke } from '@tauri-apps/api/core';
 
@@ -17,6 +17,37 @@ const LayoutInner = () => {
   const [deviceConnected, setDeviceConnected] = useState<boolean>(false);
   const [deviceSessionId, setDeviceSessionId] = useState<string | null>(null);
   const [downloadedVoiceIds, setDownloadedVoiceIds] = useState<Set<string>>(new Set());
+
+  // Network monitoring
+  const [initialIp, setInitialIp] = useState<string | null>(null);
+  const [showNetworkBanner, setShowNetworkBanner] = useState(false);
+  const [newIp, setNewIp] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    const checkIp = async () => {
+      try {
+        const info = await api.getNetworkInfo();
+        if (cancelled) return;
+        
+        if (!initialIp) {
+          setInitialIp(info.ip);
+        } else if (info.ip !== initialIp) {
+          setNewIp(info.ip);
+          setShowNetworkBanner(true);
+        }
+      } catch {
+        // ignore errors
+      }
+    };
+
+    checkIp();
+    const interval = setInterval(checkIp, 30000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [initialIp]);
 
   const sessionActive = deviceConnected || voiceWs.isActive;
 
@@ -110,9 +141,33 @@ const LayoutInner = () => {
   }, [navigate]);
 
   return (
-    <div className="flex h-screen overflow-hidden bg-[#f6f0e6] retro-dots">
-      <Sidebar />
-      <main className="flex-1 min-h-0 p-8 pb-36 overflow-y-auto">
+    <div className="flex flex-col h-screen overflow-hidden bg-[#f6f0e6] retro-dots">
+      {showNetworkBanner && (
+        <div className="bg-[var(--color-retro-blue)] text-white px-4 py-3 flex items-center justify-between shadow-md z-50 shrink-0 border-b-2 border-black">
+          <div className="font-mono text-sm flex items-center gap-2">
+            <RefreshCw className="animate-spin" size={16} />
+            <span>
+              <strong>WiFi Change Detected: Refresh your app so your toy can find you.</strong>
+            </span>
+          </div>
+          <button 
+            onClick={async () => {
+              try {
+                await api.restartMdns();
+              } catch (e) {
+                console.error("Failed to restart mDNS:", e);
+              }
+              window.location.reload();
+            }}
+            className="flex items-center rounded-[12px] gap-2 bg-white text-black px-3 cursor-pointer py-1.5 border-2 border-black shadow-[2px_2px_0px_rgba(0,0,0,1)] active:translate-x-[1px] active:translate-y-[1px] active:shadow-none font-bold text-xs uppercase hover:bg-gray-50 transition-all"
+          >
+            Refresh
+          </button>
+        </div>
+      )}
+      <div className="flex flex-1 min-h-0 overflow-hidden">
+        <Sidebar />
+        <main className="flex-1 min-h-0 p-8 pb-36 overflow-y-auto">
         <div className="max-w-4xl mx-auto">
           <Outlet />
         </div>
@@ -191,7 +246,8 @@ const LayoutInner = () => {
             </div>
           </div>
         )}
-      </main>
+        </main>
+      </div>
     </div>
   );
 };

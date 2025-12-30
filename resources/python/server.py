@@ -284,6 +284,7 @@ manager = ConnectionManager()
 # mDNS service advertisement
 mdns_service_info = None
 zeroconf_instance = None
+current_mdns_ip = None
 
 
 def _get_local_ip() -> str:
@@ -301,7 +302,7 @@ def _get_local_ip() -> str:
 
 def _start_mdns_service(port: int):
     """Start mDNS service advertisement for ESP32 discovery."""
-    global mdns_service_info, zeroconf_instance
+    global mdns_service_info, zeroconf_instance, current_mdns_ip
     try:
         from zeroconf import ServiceInfo, Zeroconf
         
@@ -320,6 +321,7 @@ def _start_mdns_service(port: int):
         
         zeroconf_instance = Zeroconf()
         zeroconf_instance.register_service(mdns_service_info)
+        current_mdns_ip = local_ip
         logger.info(f"mDNS service registered: _elato._tcp.local on {local_ip}:{port}")
     except ImportError:
         logger.warning("zeroconf not installed, mDNS service advertisement disabled")
@@ -329,7 +331,7 @@ def _start_mdns_service(port: int):
 
 def _stop_mdns_service():
     """Stop mDNS service advertisement."""
-    global mdns_service_info, zeroconf_instance
+    global mdns_service_info, zeroconf_instance, current_mdns_ip
     try:
         if zeroconf_instance and mdns_service_info:
             zeroconf_instance.unregister_service(mdns_service_info)
@@ -340,6 +342,7 @@ def _stop_mdns_service():
     finally:
         mdns_service_info = None
         zeroconf_instance = None
+        current_mdns_ip = None
 
 
 @asynccontextmanager
@@ -411,6 +414,23 @@ from typing import Optional, Dict, Any
 
 class SettingUpdate(BaseModel):
     value: Optional[str] = None
+
+@app.get("/network-info")
+async def network_info():
+    real_ip = _get_local_ip()
+    return {
+        "ip": real_ip,
+        "advertising_ip": current_mdns_ip
+    }
+
+@app.post("/restart-mdns")
+async def restart_mdns():
+    """Force restart mDNS service (useful after network change)."""
+    server_port = getattr(app.state, "server_port", 8000)
+    logger.info("Manual mDNS restart requested")
+    _stop_mdns_service()
+    _start_mdns_service(server_port)
+    return {"status": "restarted", "ip": current_mdns_ip}
 
 @app.get("/health")
 async def health():
@@ -1507,6 +1527,7 @@ def main():
     app.state.silence_duration = args.silence_duration
     app.state.streaming_interval = args.streaming_interval
     app.state.output_sample_rate = args.output_sample_rate
+    app.state.server_port = args.port
 
     uvicorn.run(app, host=args.host, port=args.port)
 

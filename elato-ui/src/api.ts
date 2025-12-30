@@ -35,6 +35,16 @@ export const api = {
     return request(`/health`);
   },
 
+  getNetworkInfo: async () => {
+    return request(`/network-info`);
+  },
+
+  restartMdns: async () => {
+    return request(`/restart-mdns`, {
+      method: "POST",
+    });
+  },
+
   startupStatus: async () => {
     return request(`/startup-status`);
   },
