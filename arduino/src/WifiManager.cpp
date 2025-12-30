@@ -432,7 +432,20 @@ bool WIFIMANAGER::tryConnect() {
         logMessage("[WIFI] Connection successful\n");
         logMessage("[WIFI] SSID   : " + WiFi.SSID() + "\n");
         logMessage("[WIFI] IP     : " + WiFi.localIP().toString() + "\n");
-        websocketSetup(ws_server, ws_port, ws_path);
+        
+        // Discover Elato server via mDNS before connecting
+        {
+          uint16_t discoveredPort = ws_port;
+          if (discoverElatoServer(ws_server_ip, discoveredPort)) {
+            logMessage("[WIFI] Using discovered server: " + ws_server_ip + ":" + String(discoveredPort) + "\n");
+            websocketSetup(ws_server_ip.c_str(), discoveredPort, ws_path);
+          } else {
+            logMessage("[WIFI] mDNS discovery failed, cannot connect to server\n");
+            // Don't call websocketSetup - no server found
+            stopSoftAP();
+            return false;
+          }
+        }
         stopSoftAP();
         return true;
       case WL_CONNECT_FAILED:

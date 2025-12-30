@@ -38,9 +38,12 @@ extern const char *password_personal;
 extern String authTokenGlobal;
 
 // WebSocket server details
-extern const char *ws_server;
+extern String ws_server_ip;  // Dynamically discovered via mDNS
 extern const uint16_t ws_port;
 extern const char *ws_path;
+
+// mDNS discovery
+bool discoverElatoServer(String &outIp, uint16_t &outPort, int timeoutMs = 10000);
 
 // I2S and Audio parameters
 extern const uint32_t SAMPLE_RATE;

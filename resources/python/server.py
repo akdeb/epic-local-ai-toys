@@ -13,6 +13,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from glob import glob
 from typing import Dict, List, Optional
+import socket
 
 from engine.characters import build_llm_messages, build_runtime_context, build_system_prompt
 
@@ -35,12 +36,52 @@ from utils import STT, LLM, TTS, create_opus_packetizer
 CLIENT_TYPE_DESKTOP = "desktop"
 CLIENT_TYPE_ESP32 = "esp32"
 
+# Bump this string when changing prompt/sanitization so logs prove which code is running.
+SERVER_BUILD_MARKER = "sanitize_v1_paraling_v2"
+
+
+def _sanitize_spoken_text(text: str) -> str:
+    if not text:
+        return text
+
+    allowed_cues = {
+        "laugh",
+        "chuckle",
+        "sigh",
+        "gasp",
+        "cough",
+        "clear throat",
+        "sniff",
+        "groan",
+        "shush",
+    }
+
+    # Strip common Markdown markers that sometimes leak into speech.
+    text = text.replace("`", "")
+    text = text.replace("**", "")
+    text = text.replace("*", "")
+    text = text.replace("__", "")
+    text = text.replace("_", "")
+
+    # Keep only allowed bracketed paralinguistic cues; drop any other [tag].
+    def _keep_or_drop(m: re.Match) -> str:
+        tag = (m.group(1) or "").strip()
+        tag_norm = " ".join(tag.lower().split())
+        if tag_norm in allowed_cues:
+            return f"[{tag_norm}]"
+        return ""
+
+    text = re.sub(r"\[([^\]]+)\]", _keep_or_drop, text)
+    text = re.sub(r"\s{2,}", " ", text).strip()
+    return text
+
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
+logger.info(f"Server build marker: {SERVER_BUILD_MARKER}")
 
-GAIN_DB = 6.0
+GAIN_DB = 7.0
 CEILING = 0.89
 
 def _resolve_voice_ref_audio_path(voice_id: Optional[str]) -> Optional[str]:
@@ -240,11 +281,75 @@ class ConnectionManager:
 pipeline: VoicePipeline = None
 manager = ConnectionManager()
 
+# mDNS service advertisement
+mdns_service_info = None
+zeroconf_instance = None
+
+
+def _get_local_ip() -> str:
+    """Get the local IP address of this machine on the network."""
+    try:
+        # Create a socket to determine the local IP
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return "127.0.0.1"
+
+
+def _start_mdns_service(port: int):
+    """Start mDNS service advertisement for ESP32 discovery."""
+    global mdns_service_info, zeroconf_instance
+    try:
+        from zeroconf import ServiceInfo, Zeroconf
+        
+        local_ip = _get_local_ip()
+        logger.info(f"Starting mDNS service advertisement on {local_ip}:{port}")
+        
+        # Create service info for _elato._tcp.local
+        mdns_service_info = ServiceInfo(
+            "_elato._tcp.local.",
+            "Elato Voice Server._elato._tcp.local.",
+            addresses=[socket.inet_aton(local_ip)],
+            port=port,
+            properties={"path": "/ws/esp32"},
+            server="elato.local.",
+        )
+        
+        zeroconf_instance = Zeroconf()
+        zeroconf_instance.register_service(mdns_service_info)
+        logger.info(f"mDNS service registered: _elato._tcp.local on {local_ip}:{port}")
+    except ImportError:
+        logger.warning("zeroconf not installed, mDNS service advertisement disabled")
+    except Exception as e:
+        logger.error(f"Failed to start mDNS service: {e}")
+
+
+def _stop_mdns_service():
+    """Stop mDNS service advertisement."""
+    global mdns_service_info, zeroconf_instance
+    try:
+        if zeroconf_instance and mdns_service_info:
+            zeroconf_instance.unregister_service(mdns_service_info)
+            zeroconf_instance.close()
+            logger.info("mDNS service stopped")
+    except Exception as e:
+        logger.error(f"Failed to stop mDNS service: {e}")
+    finally:
+        mdns_service_info = None
+        zeroconf_instance = None
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global pipeline
     app.state.pipeline_ready = False
+    
+    # Start mDNS service advertisement
+    server_port = getattr(app.state, "server_port", 8000)
+    _start_mdns_service(server_port)
     
     # Initialize database (already handled by module import, but logging for clarity)
     logger.info("Database service active")
@@ -286,6 +391,7 @@ async def lifespan(app: FastAPI):
     app.state.pipeline_ready = True
     yield
     logger.info("Shutting down...")
+    _stop_mdns_service()
 
 
 app = FastAPI(title="Voice Pipeline WebSocket Server", lifespan=lifespan)
@@ -854,7 +960,11 @@ async def websocket_unified(websocket: WebSocket, client_type: str = Query(defau
 
         behavior_constraints = (
             "You always respond with short sentences. "
-            "Avoid punctuation like parentheses or colons that would not appear in conversational speech."
+            "Avoid punctuation like parentheses or colons or markdown that would not appear in conversational speech. Do not use Markdown formatting (no *, **, _, __, backticks). "
+            "To add expressivity, you should occasionally use ONLY these paralinguistic cues in brackets: "
+            "[laugh], [chuckle], [sigh], [gasp], [cough], [clear throat], [sniff], [groan], [shush]. "
+            "Use only these cues naturally in context to enhance the conversational flow. "
+            "Examples: [chuckle] That is funny. [sigh] That was a long day."
         )
 
         sys_prompt = build_system_prompt(
@@ -1056,6 +1166,13 @@ async def websocket_unified(websocket: WebSocket, client_type: str = Query(defau
         except Exception as e:
             logger.error(f"{client_label} LLM generation error: {e}")
             return
+
+        raw_response = full_response
+        full_response = _sanitize_spoken_text(full_response)
+        if raw_response != full_response:
+            logger.info(
+                f"{client_label} Sanitized LLM response (raw_len={len(raw_response)}, sanitized_len={len(full_response)})"
+            )
         
         if cancel_event.is_set():
             logger.warning(f"{client_label} Cancelled before LLM response")

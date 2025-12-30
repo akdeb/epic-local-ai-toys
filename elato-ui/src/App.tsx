@@ -18,7 +18,7 @@ function SetupGate() {
   const [checking, setChecking] = useState(true);
   const [needsSetup, setNeedsSetup] = useState(false);
   const [backendReady, setBackendReady] = useState(false);
-  const [startupMsg, setStartupMsg] = useState<string>("Starting backend...");
+  const [startupMsg, setStartupMsg] = useState<string>("Starting Local AI Engine...");
 
   useEffect(() => {
     let cancelled = false;
@@ -55,7 +55,7 @@ function SetupGate() {
             return;
           }
         } catch {
-          if (!cancelled) setStartupMsg("Starting backend...");
+          if (!cancelled) setStartupMsg("Starting Local AI Engine...");
         }
         await new Promise((r) => setTimeout(r, 500));
       }

@@ -27,6 +27,7 @@ dependencies = [
     "esptool==5.1.0",
     "pyserial==3.5",
     "av>=16.0.0",
+    "zeroconf>=0.136.0",
 ]
 
 [project.optional-dependencies]

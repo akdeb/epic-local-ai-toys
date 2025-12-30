@@ -146,7 +146,7 @@ export const ModelSetupPage = () => {
 
   const handleContinue = async () => {
     try {
-      setProgress("Starting backend...");
+      setProgress("Starting Local AI Engine...");
       await invoke("start_backend");
       await invoke("mark_setup_complete");
       setError(null);
