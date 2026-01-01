@@ -21,7 +21,6 @@ const LayoutInner = () => {
   // Network monitoring
   const [initialIp, setInitialIp] = useState<string | null>(null);
   const [showNetworkBanner, setShowNetworkBanner] = useState(false);
-  const [newIp, setNewIp] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -33,7 +32,6 @@ const LayoutInner = () => {
         if (!initialIp) {
           setInitialIp(info.ip);
         } else if (info.ip !== initialIp) {
-          setNewIp(info.ip);
           setShowNetworkBanner(true);
         }
       } catch {

@@ -15,12 +15,18 @@ from glob import glob
 from typing import Dict, List, Optional
 import socket
 
+os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
+os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "1")
+os.environ.setdefault("HF_XET_DISABLE", "1")
+os.environ.setdefault("HF_HUB_DISABLE_HF_XET", "1")
+
 from engine.characters import build_llm_messages, build_runtime_context, build_system_prompt
 
 import mlx.core as mx
 import numpy as np
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Query
+from fastapi.responses import StreamingResponse
 from starlette.websockets import WebSocketState
 from mlx_lm import generate as mx_generate
 from mlx_lm.utils import load as load_llm
@@ -367,7 +373,7 @@ async def lifespan(app: FastAPI):
     if not hasattr(app.state, "stt_model"):
         app.state.stt_model = STT
     if not hasattr(app.state, "llm_model"):
-        app.state.llm_model = LLM
+        app.state.llm_model = db_service.db_service.get_setting("llm_model") or LLM
     # if not hasattr(app.state, "tts_ref_audio"):
     #     app.state.tts_ref_audio = os.path.join(os.path.dirname(__file__), "tts", "santa.wav")
     if not hasattr(app.state, "silence_threshold"):
@@ -640,6 +646,262 @@ async def set_models(body: ModelsUpdate):
     if body.model_repo:
         db_service.db_service.set_setting("llm_model", body.model_repo)
     return await get_models()
+
+
+class ModelSwitchRequest(BaseModel):
+    model_repo: str
+
+
+@app.post("/models/switch")
+async def switch_model(body: ModelSwitchRequest):
+    """
+    Download a new LLM model and hot-swap it into the running pipeline.
+    Returns a streaming response with progress updates as JSON lines.
+    
+    Progress format (newline-delimited JSON):
+    {"stage": "downloading", "progress": 0.5, "message": "Downloading..."}
+    {"stage": "loading", "progress": 0.9, "message": "Loading model weights..."}
+    {"stage": "complete", "progress": 1.0, "message": "Model switched successfully"}
+    {"stage": "error", "error": "Error message"}
+    """
+    global pipeline
+    
+    model_repo = body.model_repo.strip()
+    if not model_repo:
+        raise HTTPException(status_code=400, detail="model_repo is required")
+    
+    async def generate_progress():
+        try:
+            # Stage 1: Download the model
+            yield json.dumps({"stage": "downloading", "progress": 0.0, "message": f"Starting download of {model_repo}..."}) + "\n"
+            
+            from huggingface_hub import HfApi, snapshot_download
+            from huggingface_hub.constants import HF_HUB_CACHE
+            import threading
+            import time
+            
+            download_complete = threading.Event()
+            download_error = [None]
+            download_path = [None]
+            start_time = [asyncio.get_event_loop().time()]
+            expected_total_bytes = [None]
+            baseline_bytes = [0]
+            last_bytes = [0]
+            last_change_monotonic = [time.monotonic()]
+
+            def _repo_cache_dir() -> str:
+                # HF cache layout: $HF_HUB_CACHE/models--org--repo
+                repo_dir_name = f"models--{model_repo.replace('/', '--')}"
+                return os.path.join(str(HF_HUB_CACHE), repo_dir_name)
+
+            def _repo_cache_bytes() -> int:
+                # Count both completed blobs and any .incomplete files.
+                try:
+                    base = _repo_cache_dir()
+                    total = 0
+                    for sub in ("blobs", "snapshots"):
+                        d = os.path.join(base, sub)
+                        if not os.path.isdir(d):
+                            continue
+                        for root, _dirs, files in os.walk(d):
+                            for fn in files:
+                                fp = os.path.join(root, fn)
+                                try:
+                                    st = os.stat(fp)
+                                    total += int(st.st_size)
+                                except Exception:
+                                    continue
+                    return total
+                except Exception:
+                    return 0
+
+            def _xet_cache_bytes() -> int:
+                # When HF uses Xet/CAS (cas-bridge.xethub.hf.co), the bulk data is stored under
+                # the xet cache (typically alongside the hub cache).
+                try:
+                    # HF_HUB_CACHE is usually .../huggingface/hub; xet cache is often .../huggingface/xet
+                    hub_cache = str(HF_HUB_CACHE)
+                    root = os.path.dirname(hub_cache)
+                    candidates = [
+                        os.path.join(root, "xet"),
+                        os.path.join(root, "xet-cache"),
+                    ]
+                    # Allow overrides if present
+                    for env_key in ("HF_XET_CACHE", "XET_CACHE_DIR", "XET_HOME"):
+                        v = os.environ.get(env_key)
+                        if v and v.strip():
+                            candidates.insert(0, v.strip())
+
+                    total = 0
+                    for d in candidates:
+                        if not d or not os.path.isdir(d):
+                            continue
+                        for root_dir, _dirs, files in os.walk(d):
+                            for fn in files:
+                                fp = os.path.join(root_dir, fn)
+                                try:
+                                    st = os.stat(fp)
+                                    total += int(st.st_size)
+                                except Exception:
+                                    continue
+                    return total
+                except Exception:
+                    return 0
+
+            def _total_cache_bytes() -> int:
+                # Track overall cache growth (hub + xet) relative to a baseline.
+                return _repo_cache_bytes() + _xet_cache_bytes()
+
+            def _compute_expected_total_bytes() -> int | None:
+                try:
+                    # Some repos only expose per-file sizes when files_metadata=True.
+                    info = HfApi().model_info(model_repo, files_metadata=True)
+                    total = 0
+                    siblings = getattr(info, "siblings", None) or []
+                    for s in siblings:
+                        size = getattr(s, "size", None)
+                        if isinstance(size, int) and size > 0:
+                            total += size
+                    return total or None
+                except Exception:
+                    return None
+            
+            def download_model():
+                try:
+                    # Reliability knobs:
+                    # - Disable Xet backend (it can stall on some networks)
+                    # - Try to enable hf_transfer if installed (faster/more resilient)
+                    os.environ["HF_HUB_DISABLE_XET"] = "1"
+                    os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
+                    os.environ["HF_XET_DISABLE"] = "1"
+                    os.environ["HF_HUB_DISABLE_HF_XET"] = "1"
+
+                    expected_total_bytes[0] = _compute_expected_total_bytes()
+
+                    # Download the full model snapshot
+                    path = snapshot_download(
+                        repo_id=model_repo,
+                        local_files_only=False,
+                        resume_download=True,
+                        max_workers=4,
+                    )
+                    download_path[0] = path
+                except Exception as e:
+                    download_error[0] = str(e)
+                finally:
+                    download_complete.set()
+            
+            # Start download in background thread
+            download_thread = threading.Thread(target=download_model)
+            download_thread.start()
+            
+            # Poll for completion and send progress updates.
+            # We compute progress from bytes in the HF cache (works reliably when Xet is disabled).
+            # Also detect stalls (no byte growth for a while) and surface a clear error.
+            stall_seconds = 300  # 5 minutes
+
+            # Baseline the cache size at start so we can report bytes downloaded for this request.
+            baseline_bytes[0] = _total_cache_bytes()
+            last_bytes[0] = 0
+            while not download_complete.is_set():
+                await asyncio.sleep(1.0)  # Check every second
+                elapsed = asyncio.get_event_loop().time() - start_time[0]
+
+                current_bytes = max(0, _total_cache_bytes() - baseline_bytes[0])
+                if current_bytes != last_bytes[0]:
+                    last_bytes[0] = current_bytes
+                    last_change_monotonic[0] = time.monotonic()
+                else:
+                    if time.monotonic() - last_change_monotonic[0] > stall_seconds:
+                        yield json.dumps({
+                            "stage": "error",
+                            "error": (
+                                "Model download appears stalled (no disk progress for 5 minutes). "
+                                "This is often caused by the HuggingFace Xet backend or an unstable network. "
+                                "Please retry; the server now forces HF_HUB_DISABLE_XET=1."
+                            ),
+                        }) + "\n"
+                        return
+
+                if isinstance(expected_total_bytes[0], int) and expected_total_bytes[0] > 0:
+                    progress = min(0.99, current_bytes / expected_total_bytes[0])
+                else:
+                    # Fallback: keep UI moving even if we couldn't estimate the total size.
+                    progress = min(0.95, 1.0 - (1.0 / (1.0 + elapsed / 10.0)))
+                
+                # Show elapsed time in message for long downloads
+                if elapsed > 30:
+                    mins = int(elapsed // 60)
+                    secs = int(elapsed % 60)
+                    time_str = f"{mins}m {secs}s" if mins > 0 else f"{secs}s"
+                    if isinstance(expected_total_bytes[0], int) and expected_total_bytes[0] > 0:
+                        gb = current_bytes / (1024 ** 3)
+                        total_gb = expected_total_bytes[0] / (1024 ** 3)
+                        msg = f"Downloading {model_repo}... ({gb:.2f}/{total_gb:.2f} GB, {time_str} elapsed)"
+                    else:
+                        gb = current_bytes / (1024 ** 3)
+                        msg = f"Downloading {model_repo}... ({gb:.2f} GB downloaded, {time_str} elapsed)"
+                else:
+                    gb = current_bytes / (1024 ** 3)
+                    msg = f"Downloading {model_repo}... ({gb:.2f} GB)"
+                
+                yield json.dumps({"stage": "downloading", "progress": progress, "message": msg}) + "\n"
+            
+            download_thread.join()
+            
+            if download_error[0]:
+                yield json.dumps({"stage": "error", "error": f"Download failed: {download_error[0]}"}) + "\n"
+                return
+            
+            yield json.dumps({"stage": "downloading", "progress": 1.0, "message": "Download complete!"}) + "\n"
+            
+            # Stage 2: Load the model into memory
+            yield json.dumps({"stage": "loading", "progress": 0.0, "message": "Loading model weights..."}) + "\n"
+            
+            try:
+                # Load the new model
+                new_llm, new_tokenizer = await asyncio.to_thread(
+                    lambda: load_llm(model_repo)
+                )
+                
+                yield json.dumps({"stage": "loading", "progress": 0.5, "message": "Model loaded, swapping..."}) + "\n"
+                
+                # Hot-swap the model in the pipeline
+                if pipeline:
+                    async with pipeline.mlx_lock:
+                        # Replace the old model with the new one
+                        old_llm = pipeline.llm
+                        old_tokenizer = pipeline.tokenizer
+                        
+                        pipeline.llm = new_llm
+                        pipeline.tokenizer = new_tokenizer
+                        pipeline.llm_model = model_repo
+                        
+                        # Clear old model from memory
+                        del old_llm
+                        del old_tokenizer
+                        mx.metal.clear_cache()
+                
+                # Save the setting
+                db_service.db_service.set_setting("llm_model", model_repo)
+                
+                yield json.dumps({"stage": "loading", "progress": 1.0, "message": "Model weights loaded!"}) + "\n"
+                yield json.dumps({"stage": "complete", "progress": 1.0, "message": f"Successfully switched to {model_repo}"}) + "\n"
+                
+            except Exception as e:
+                logger.error(f"Failed to load model: {e}")
+                yield json.dumps({"stage": "error", "error": f"Failed to load model: {str(e)}"}) + "\n"
+                
+        except Exception as e:
+            logger.error(f"Model switch failed: {e}")
+            yield json.dumps({"stage": "error", "error": str(e)}) + "\n"
+    
+    return StreamingResponse(
+        generate_progress(),
+        media_type="application/x-ndjson",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+    )
+
 
 # --- Voices ---
 

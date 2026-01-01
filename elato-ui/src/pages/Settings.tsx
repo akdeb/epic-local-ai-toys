@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { api } from '../api';
 import { RefreshCw, Brain, Radio, MonitorUp, Rss, Zap } from 'lucide-react';
+import { ModelSwitchModal } from '../components/ModelSwitchModal';
 
 type ModelConfig = {
   llm: {
@@ -15,13 +16,20 @@ export const Settings = () => {
   const [models, setModels] = useState<ModelConfig | null>(null);
   const [loading, setLoading] = useState(true);
   const [llmRepo, setLlmRepo] = useState('');
-  const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [ports, setPorts] = useState<string[]>([]);
   const [selectedPort, setSelectedPort] = useState<string>('');
   const [flashing, setFlashing] = useState(false);
   const [flashLog, setFlashLog] = useState<string>('');
   const [laptopVolume, setLaptopVolume] = useState<number>(70);
+
+  // Model switch modal state
+  const [showSwitchModal, setShowSwitchModal] = useState(false);
+  const [switchStage, setSwitchStage] = useState<'downloading' | 'loading' | 'complete' | 'error'>('downloading');
+  const [switchProgress, setSwitchProgress] = useState(0);
+  const [switchMessage, setSwitchMessage] = useState('');
+  const [switchError, setSwitchError] = useState<string | undefined>();
+  const [pendingModelRepo, setPendingModelRepo] = useState<string>('');
 
   const isLikelyDevicePort = (port: string) => /\/dev\/(cu|tty)\.(usbserial|usbmodem)/i.test(port);
 
@@ -97,17 +105,58 @@ export const Settings = () => {
 
   const handleSaveModel = async () => {
     if (!llmRepo.trim()) return;
-    setSaving(true);
-    setError(null);
+    
+    // Open the modal and start the switch process
+    setPendingModelRepo(llmRepo);
+    setShowSwitchModal(true);
+    setSwitchStage('downloading');
+    setSwitchProgress(0);
+    setSwitchMessage('Starting...');
+    setSwitchError(undefined);
+    
+    await performModelSwitch(llmRepo);
+  };
+
+  const performModelSwitch = async (modelRepo: string) => {
     try {
-      await api.setModels({ model_repo: llmRepo });
-      await loadSettings(); 
-    } catch (e) {
-      console.error('Failed to update model:', e);
-      setError('Failed to save settings. Please try again.');
-    } finally {
-      setSaving(false);
+      for await (const update of api.switchModel(modelRepo)) {
+        if (update.stage === 'error') {
+          setSwitchStage('error');
+          setSwitchError(update.error);
+          setSwitchProgress(0);
+          setSwitchMessage('Failed');
+          return;
+        }
+        
+        setSwitchStage(update.stage);
+        setSwitchProgress(update.progress ?? 0);
+        setSwitchMessage(update.message ?? '');
+        
+        if (update.stage === 'complete') {
+          // Refresh settings to show the new model
+          await loadSettings();
+        }
+      }
+    } catch (e: any) {
+      console.error('Model switch failed:', e);
+      setSwitchStage('error');
+      setSwitchError(e?.message || 'Unknown error');
     }
+  };
+
+  const handleRetrySwitch = () => {
+    if (pendingModelRepo) {
+      setSwitchStage('downloading');
+      setSwitchProgress(0);
+      setSwitchMessage('Retrying...');
+      setSwitchError(undefined);
+      performModelSwitch(pendingModelRepo);
+    }
+  };
+
+  const handleCloseModal = () => {
+    setShowSwitchModal(false);
+    setPendingModelRepo('');
   };
 
   return (
@@ -146,11 +195,11 @@ export const Settings = () => {
               />
               <button 
                 onClick={handleSaveModel}
-                disabled={saving || loading || llmRepo === models?.llm.repo}
+                disabled={showSwitchModal || loading || llmRepo === models?.llm.repo}
                 className="retro-btn bg-[#9b5cff] text-white disabled:opacity-50 flex items-center gap-2"
               >
-                {saving ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Rss className="w-4 h-4" />}
-                {saving ? 'Saving...' : 'Update'}
+                <Rss className="w-4 h-4" />
+                Update
               </button>
             </div>
             <p className="text-[10px] mt-2 opacity-60">
@@ -279,6 +328,17 @@ export const Settings = () => {
 
 
       </div>
+
+      {/* Model Switch Modal */}
+      <ModelSwitchModal
+        isOpen={showSwitchModal}
+        stage={switchStage}
+        progress={switchProgress}
+        message={switchMessage}
+        error={switchError}
+        onRetry={handleRetrySwitch}
+        onClose={handleCloseModal}
+      />
     </div>
   );
 };

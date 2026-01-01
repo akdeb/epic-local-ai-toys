@@ -212,4 +212,66 @@ export const api = {
       body: JSON.stringify(data),
     });
   },
+
+  /**
+   * Switch to a new LLM model. Downloads the model first, then hot-swaps it.
+   * Returns an async generator that yields progress updates.
+   */
+  switchModel: async function* (modelRepo: string): AsyncGenerator<{
+    stage: "downloading" | "loading" | "complete" | "error";
+    progress?: number;
+    message?: string;
+    error?: string;
+  }> {
+    const res = await fetch(`${API_BASE}/models/switch`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model_repo: modelRepo }),
+    });
+
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      yield { stage: "error", error: text || `Request failed: ${res.status}` };
+      return;
+    }
+
+    const reader = res.body?.getReader();
+    if (!reader) {
+      yield { stage: "error", error: "No response body" };
+      return;
+    }
+
+    const decoder = new TextDecoder();
+    let buffer = "";
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() || "";
+
+      for (const line of lines) {
+        if (line.trim()) {
+          try {
+            const data = JSON.parse(line);
+            yield data;
+          } catch {
+            // Skip malformed lines
+          }
+        }
+      }
+    }
+
+    // Process any remaining buffer
+    if (buffer.trim()) {
+      try {
+        const data = JSON.parse(buffer);
+        yield data;
+      } catch {
+        // Skip malformed data
+      }
+    }
+  },
 };

@@ -762,6 +762,8 @@ async fn start_backend(app: AppHandle) -> Result<String, String> {
         .env("ELATO_DB_PATH", elato_db_path.to_string_lossy().to_string())
         .env("ELATO_VOICES_DIR", elato_voices_dir.to_string_lossy().to_string())
         .env("TOKENIZERS_PARALLELISM", "false")
+        .env("HF_HUB_DISABLE_XET", "1")
+        .env("HF_HUB_ENABLE_HF_TRANSFER", "1")
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
         .spawn()
@@ -829,6 +831,8 @@ pub fn run() {
                 .env("ELATO_DB_PATH", elato_db_path.to_string_lossy().to_string())
                 .env("ELATO_VOICES_DIR", elato_voices_dir.to_string_lossy().to_string())
                 .env("TOKENIZERS_PARALLELISM", "false")
+                .env("HF_HUB_DISABLE_XET", "1")
+                .env("HF_HUB_ENABLE_HF_TRANSFER", "1")
                 .stdout(Stdio::inherit())
                 .stderr(Stdio::inherit())
                 .spawn();
