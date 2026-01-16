@@ -32,7 +32,7 @@ from mlx_lm import generate as mx_generate
 from mlx_lm.utils import load as load_llm
 
 from mlx_audio.stt.models.whisper import Model as Whisper
-from tts import ChatterboxTTS
+from tts import ChatterboxTTS, PocketTTS
 import db_service  # DB ops exposed via HTTP endpoints
 from fastapi.middleware.cors import CORSMiddleware
 import utils
@@ -46,7 +46,7 @@ CLIENT_TYPE_ESP32 = "esp32"
 SERVER_BUILD_MARKER = "sanitize_v1_paraling_v2"
 
 
-def _sanitize_spoken_text(text: str) -> str:
+def _sanitize_spoken_text(text: str, *, allow_paralinguistic: bool = True) -> str:
     if not text:
         return text
 
@@ -69,15 +69,17 @@ def _sanitize_spoken_text(text: str) -> str:
     text = text.replace("__", "")
     text = text.replace("_", "")
 
-    # Keep only allowed bracketed paralinguistic cues; drop any other [tag].
-    def _keep_or_drop(m: re.Match) -> str:
-        tag = (m.group(1) or "").strip()
-        tag_norm = " ".join(tag.lower().split())
-        if tag_norm in allowed_cues:
-            return f"[{tag_norm}]"
-        return ""
+    if allow_paralinguistic:
+        def _keep_or_drop(m: re.Match) -> str:
+            tag = (m.group(1) or "").strip()
+            tag_norm = " ".join(tag.lower().split())
+            if tag_norm in allowed_cues:
+                return f"[{tag_norm}]"
+            return ""
 
-    text = re.sub(r"\[([^\]]+)\]", _keep_or_drop, text)
+        text = re.sub(r"\[([^\]]+)\]", _keep_or_drop, text)
+    else:
+        text = re.sub(r"\[[^\]]+\]", "", text)
     text = re.sub(r"\s{2,}", " ", text).strip()
     return text
 
@@ -117,6 +119,7 @@ class VoicePipeline:
         stt_model=STT,
         llm_model=LLM,
         tts_ref_audio: str | None = None,
+        tts_backend: str = "pocket",
     ):
         self.silence_threshold = silence_threshold
         self.silence_duration = silence_duration
@@ -130,6 +133,7 @@ class VoicePipeline:
         # LLM model is dynamic
         self.llm_model = llm_model
         self.tts_ref_audio = tts_ref_audio
+        self.tts_backend = tts_backend
 
         self.mlx_lock = asyncio.Lock()
 
@@ -142,17 +146,39 @@ class VoicePipeline:
         logger.info(f"Loading speech-to-text model: {self.stt_model_id}")
         self.stt = Whisper.from_pretrained(self.stt_model_id)
 
-        # Initialize Chatterbox TTS
-        logger.info("Loading Chatterbox TTS...")
-        self.tts = ChatterboxTTS(
-            model_id=TTS,
-            # ref_audio_path=self.tts_ref_audio,
-            output_sample_rate=self.output_sample_rate,
-            stream=True,
-            streaming_interval=self.streaming_interval,
-        )
+        await self._init_tts()
+
+    async def _init_tts(self):
+        backend = (self.tts_backend or "").strip().lower() or "pocket"
+        if backend not in ("pocket", "chatterbox"):
+            backend = "pocket"
+
+        if backend == "chatterbox":
+            self.tts = ChatterboxTTS(
+                model_id=TTS,
+                output_sample_rate=self.output_sample_rate,
+                stream=True,
+                streaming_interval=self.streaming_interval,
+            )
+        else:
+            self.tts = PocketTTS(
+                model_id=TTS,
+                output_sample_rate=self.output_sample_rate,
+                stream=True,
+                streaming_interval=self.streaming_interval,
+            )
 
         await asyncio.to_thread(self.tts.load)
+
+    async def set_tts_backend(self, backend: str) -> str:
+        backend = (backend or "").strip().lower()
+        if backend not in ("pocket", "chatterbox"):
+            raise ValueError("tts_backend must be 'pocket' or 'chatterbox'")
+
+        async with self.mlx_lock:
+            self.tts_backend = backend
+            await self._init_tts()
+        return backend
 
         # # Warm up TTS once at startup
         # logger.info("Warming up TTS...")
@@ -374,6 +400,8 @@ async def lifespan(app: FastAPI):
         app.state.stt_model = STT
     if not hasattr(app.state, "llm_model"):
         app.state.llm_model = db_service.db_service.get_setting("llm_model") or LLM
+    if not hasattr(app.state, "tts_backend"):
+        app.state.tts_backend = db_service.db_service.get_setting("tts_backend") or "pocket"
     # if not hasattr(app.state, "tts_ref_audio"):
     #     app.state.tts_ref_audio = os.path.join(os.path.dirname(__file__), "tts", "santa.wav")
     if not hasattr(app.state, "silence_threshold"):
@@ -390,6 +418,7 @@ async def lifespan(app: FastAPI):
         llm_model=app.state.llm_model,
         # tts_ref_audio=app.state.tts_ref_audio,
         tts_ref_audio=None,
+        tts_backend=app.state.tts_backend,
         silence_threshold=app.state.silence_threshold,
         silence_duration=app.state.silence_duration,
         streaming_interval=app.state.streaming_interval,
@@ -471,6 +500,14 @@ async def get_setting(key: str):
 async def set_setting(key: str, body: SettingUpdate):
     """Set a setting value."""
     db_service.db_service.set_setting(key, body.value)
+    if key == "tts_backend":
+        try:
+            if pipeline:
+                await pipeline.set_tts_backend(body.value or "")
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
     return {"key": key, "value": body.value}
 
 @app.delete("/settings/{key}")
@@ -625,8 +662,8 @@ async def get_models():
             "loaded": pipeline is not None and pipeline.llm is not None,
         },
         "tts": {
-            "backend": "chatterbox",
-            "backbone_repo": "mlx-community/chatterbox-turbo-fp16",
+            "backend": (getattr(pipeline, "tts_backend", None) or db_service.db_service.get_setting("tts_backend") or "pocket"),
+            "backbone_repo": None,
             "codec_repo": None,
             "loaded": pipeline is not None and pipeline.tts is not None,
         },
@@ -1240,14 +1277,21 @@ async def websocket_unified(websocket: WebSocket, client_type: str = Query(defau
         except Exception:
             user_ctx = None
 
+        tts_backend = (getattr(pipeline, "tts_backend", None) or db_service.db_service.get_setting("tts_backend") or "pocket")
+        tts_backend = (tts_backend or "").strip().lower() or "pocket"
+
         behavior_constraints = (
             "You always respond with short sentences. "
             "Avoid punctuation like parentheses or colons or markdown that would not appear in conversational speech. Do not use Markdown formatting (no *, **, _, __, backticks). "
-            "To add expressivity, you should occasionally use ONLY these paralinguistic cues in brackets: "
-            "[laugh], [chuckle], [sigh], [gasp], [cough], [clear throat], [sniff], [groan], [shush]. "
-            "Use only these cues naturally in context to enhance the conversational flow. "
-            "Examples: [chuckle] That is funny. [sigh] That was a long day."
         )
+
+        if tts_backend != "pocket":
+            behavior_constraints += (
+                "To add expressivity, you should occasionally use ONLY these paralinguistic cues in brackets: "
+                "[laugh], [chuckle], [sigh], [gasp], [cough], [clear throat], [sniff], [groan], [shush]. "
+                "Use only these cues naturally in context to enhance the conversational flow. "
+                "Examples: [chuckle] That is funny. [sigh] That was a long day."
+            )
 
         sys_prompt = build_system_prompt(
             personality_name=getattr(personality, "name", None),
@@ -1309,6 +1353,9 @@ async def websocket_unified(websocket: WebSocket, client_type: str = Query(defau
             greeting_user_text, messages=greeting_messages, max_tokens=50
         )
         greeting_text = greeting_text.strip() or "Hello!"
+
+        allow_paralinguistic = (getattr(pipeline, "tts_backend", None) or "pocket") != "pocket"
+        greeting_text = _sanitize_spoken_text(greeting_text, allow_paralinguistic=allow_paralinguistic)
         
         logger.info(f"{client_label} Greeting: {greeting_text}")
         
@@ -1450,7 +1497,8 @@ async def websocket_unified(websocket: WebSocket, client_type: str = Query(defau
             return
 
         raw_response = full_response
-        full_response = _sanitize_spoken_text(full_response)
+        allow_paralinguistic = (getattr(pipeline, "tts_backend", None) or "pocket") != "pocket"
+        full_response = _sanitize_spoken_text(full_response, allow_paralinguistic=allow_paralinguistic)
         if raw_response != full_response:
             logger.info(
                 f"{client_label} Sanitized LLM response (raw_len={len(raw_response)}, sanitized_len={len(full_response)})"
