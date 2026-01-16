@@ -19,7 +19,7 @@ struct ApiProcess(Mutex<Option<Child>>);
 
 const STT: &str = "mlx-community/whisper-large-v3-turbo";
 const LLM: &str = "mlx-community/Ministral-3-3B-Instruct-2512-4bit";
-const TTS: &str = "mlx-community/chatterbox-turbo-4bit";
+const TTS: &str = "mlx-community/chatterbox-turbo-fp16";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SetupStatus {

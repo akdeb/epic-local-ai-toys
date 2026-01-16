@@ -12,7 +12,7 @@ class ChatterboxTTS:
 
     def __init__(
         self,
-        model_id: str = "mlx-community/chatterbox-turbo-4bit",
+        model_id: str = "mlx-community/chatterbox-turbo-fp16",
         ref_audio_path: Optional[str] = None,
         output_sample_rate: int = 24_000,
         temperature: float = 0.8,

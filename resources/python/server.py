@@ -626,7 +626,7 @@ async def get_models():
         },
         "tts": {
             "backend": "chatterbox",
-            "backbone_repo": "mlx-community/chatterbox-turbo-4bit",
+            "backbone_repo": "mlx-community/chatterbox-turbo-fp16",
             "codec_repo": None,
             "loaded": pipeline is not None and pipeline.tts is not None,
         },
